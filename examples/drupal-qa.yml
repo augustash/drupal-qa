@@ -1,0 +1,15 @@
+# .github/workflows/drupal-qa.yml
+name: Drupal QA
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main]
+
+jobs:
+  qa:
+    uses: augustash/drupal-qa/.github/workflows/pipeline.yml@v2
+    with:
+      pantheon_site: my-site
+    secrets: inherit

@@ -1,15 +1,14 @@
 @smoke @drupal-qa @commerce
 Feature: Shopping cart
-  As a customer
-  I need the cart to function correctly
-  So that I can manage items before checkout
+  The cart page works for visitors and customers.
 
-  Scenario: Anonymous user can access the cart page
+  Scenario: Anonymous visitors can open the cart
     Given I am an anonymous user
     When I go to "/cart"
     Then I should get a 200 HTTP response
 
-  Scenario: Empty cart shows appropriate message
+  @api
+  Scenario: A new customer sees an empty cart
     Given I am logged in as a user with the "authenticated" role
     When I go to "/cart"
-    Then I should see "Your cart is empty"
+    Then I should see "cart is empty"

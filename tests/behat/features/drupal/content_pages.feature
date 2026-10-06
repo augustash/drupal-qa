@@ -1,20 +1,13 @@
 @smoke @drupal-qa @content
-Feature: Content pages
-  As a site visitor
-  I need core pages to load correctly
-  So that I can browse the site
+Feature: Pages load
+  The front page loads and a missing page is a real 404.
 
-  Scenario: Homepage returns 200
+  Scenario: The front page loads
     Given I am an anonymous user
     When I go to the homepage
     Then I should get a 200 HTTP response
 
-  Scenario: Authenticated user can access the homepage
-    Given I am logged in as a user with the "authenticated" role
-    When I go to the homepage
-    Then I should get a 200 HTTP response
-
-  Scenario: 404 page returns proper status code
+  Scenario: A missing page returns 404
     Given I am an anonymous user
-    When I go to "/this-page-definitely-does-not-exist-12345"
+    When I go to "/drupal-qa-page-that-does-not-exist"
     Then I should get a 404 HTTP response

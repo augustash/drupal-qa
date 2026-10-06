@@ -1,10 +1,9 @@
+# drupal-qa default PHPStan config, used when a project has none of its own.
+# CI passes the paths to analyse (custom modules, profiles and every theme
+# that is not contrib) on the command line, so none are listed here: paths in
+# this file would resolve relative to vendor/, not to the project.
 parameters:
   level: 1
-  paths:
-    - web/modules/custom
-    - web/themes
-  excludePaths:
-    - web/themes/contrib
   fileExtensions:
     - php
     - module

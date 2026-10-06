@@ -1,0 +1,839 @@
+name: Drupal QA
+
+# One reusable workflow for a Drupal site on Pantheon. The caller triggers it on
+# pull_request (opened, synchronize, reopened, closed) and on push to the default
+# branch; everything else is decided here, in the plan job.
+#
+# The rules that matter more than any single check:
+#   - A step that did not run, or ran nothing, is never reported as a pass.
+#   - Warn-only failures are shown in the run summary and as annotations.
+#   - updatedb and config:import run only once the environment is serving the
+#     new code. Pantheon's code log and workflow status both report success
+#     before the container has the new files, which is how v1 raced its own
+#     deploys.
+#   - Delivery to an environment queues and never cancels: a cancelled
+#     multidev:create leaves a half-built environment Pantheon cannot roll back.
+
+on:
+  workflow_call:
+    inputs:
+      pantheon_site:
+        description: Pantheon site machine name. Not needed with code_host none.
+        type: string
+        default: ''
+      code_host:
+        description: "Who moves code to Pantheon: pantheon (this workflow pushes), github-app (Pantheon's GitHub App does), none (checks only)."
+        type: string
+        default: pantheon
+      multidev:
+        description: Build a pr-N multidev for each pull request. Set false for sites without multidev.
+        type: boolean
+        default: true
+      required:
+        description: Checks that fail the run instead of warning, space separated, e.g. "phpcs phpunit".
+        type: string
+        default: ''
+      skip:
+        description: Steps that do not run, space separated, e.g. "behat cim".
+        type: string
+        default: ''
+    secrets:
+      PANTHEON_MACHINE_TOKEN:
+        required: false
+      PANTHEON_SSH_KEY:
+        required: false
+
+env:
+  TERMINUS_VERSION: '4.3.3'
+  GITLEAKS_VERSION: '8.30.1'
+
+defaults:
+  run:
+    # An explicit bash shell gets -eo pipefail, so a failing command piped into
+    # tee still fails the step.
+    shell: bash
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      event: ${{ steps.plan.outputs.event }}
+      env: ${{ steps.plan.outputs.env }}
+      php: ${{ steps.plan.outputs.php }}
+      code_paths: ${{ steps.plan.outputs.code_paths }}
+      config_dir: ${{ steps.plan.outputs.config_dir }}
+      commerce: ${{ steps.plan.outputs.commerce }}
+      deploy: ${{ steps.plan.outputs.deploy }}
+      cleanup: ${{ steps.plan.outputs.cleanup }}
+      static: ${{ steps.plan.outputs.static }}
+      phpcs: ${{ steps.plan.outputs.phpcs }}
+      phpstan: ${{ steps.plan.outputs.phpstan }}
+      yamllint: ${{ steps.plan.outputs.yamllint }}
+      audit: ${{ steps.plan.outputs.audit }}
+      secrets: ${{ steps.plan.outputs.secrets }}
+      phpunit: ${{ steps.plan.outputs.phpunit }}
+      behat: ${{ steps.plan.outputs.behat }}
+      config: ${{ steps.plan.outputs.config }}
+      updatedb: ${{ steps.plan.outputs.updatedb }}
+      cim: ${{ steps.plan.outputs.cim }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Decide what runs
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SITE: ${{ inputs.pantheon_site }}
+          CODE_HOST: ${{ inputs.code_host }}
+          MULTIDEV: ${{ inputs.multidev }}
+          REQUIRED: ${{ inputs.required }}
+          SKIP: ${{ inputs.skip }}
+          HAS_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN != '' }}
+          HAS_KEY: ${{ secrets.PANTHEON_SSH_KEY != '' }}
+        run: |
+          fail() { echo "::error title=drupal-qa::$1"; exit 1; }
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+          words() { echo "$1" | tr ',[:upper:]' ' [:lower:]' | tr -s ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '; }
+
+          CHECKS="phpcs phpstan yamllint audit secrets phpunit behat config"
+          STEPS="$CHECKS updatedb cim"
+          REQUIRED=" $(words "$REQUIRED")"
+          SKIP=" $(words "$SKIP")"
+          for n in $REQUIRED; do [[ " $CHECKS " == *" $n "* ]] || fail "required: unknown check '$n'. Use any of: $CHECKS"; done
+          for n in $SKIP; do [[ " $STEPS " == *" $n "* ]] || fail "skip: unknown step '$n'. Use any of: $STEPS"; done
+
+          case "$CODE_HOST" in
+            pantheon|github-app|none) ;;
+            *) fail "code_host must be pantheon, github-app or none, not '$CODE_HOST'." ;;
+          esac
+
+          case "$EVENT_NAME" in
+            pull_request|pull_request_target)
+              env_name="pr-$PR_NUMBER"
+              if [ "$EVENT_ACTION" = closed ]; then event="pr-closed"; else event="pr"; fi
+              ;;
+            push|workflow_dispatch)
+              if [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then event=main; env_name=dev; else event=branch; env_name=; fi
+              ;;
+            *) fail "drupal-qa runs on pull_request and push, not $EVENT_NAME." ;;
+          esac
+
+          deploy=false
+          cleanup=false
+          if [ "$CODE_HOST" != none ]; then
+            if [ "$event" = main ]; then deploy=true; fi
+            if [ "$event" = pr ] && [ "$MULTIDEV" = true ]; then deploy=true; fi
+            if [ "$event" = pr-closed ] && [ "$MULTIDEV" = true ] && [ "$CODE_HOST" = pantheon ]; then cleanup=true; fi
+          fi
+          if [ "$deploy" = true ] || [ "$cleanup" = true ]; then
+            [ -n "$SITE" ] || fail "Set pantheon_site, or code_host: none to run checks only."
+            [ "$HAS_TOKEN" = true ] || fail "Secret PANTHEON_MACHINE_TOKEN is missing. Add it under Settings > Secrets and variables > Actions (repository or organization) and pass it with secrets: inherit."
+            [ "$HAS_KEY" = true ] || fail "Secret PANTHEON_SSH_KEY is missing. Add it under Settings > Secrets and variables > Actions (repository or organization) and pass it with secrets: inherit."
+          fi
+
+          # The project's own layout, so nobody has to describe it to us.
+          webroot=$(jq -r '.extra["drupal-scaffold"].locations["web-root"] // "web"' composer.json 2>/dev/null | sed -E 's#^\./##; s#/+$##')
+          [ -n "$webroot" ] || webroot=.
+          php=$(jq -r '.config.platform.php // empty' composer.json 2>/dev/null | cut -d. -f1,2)
+          if [ -z "$php" ] && [ -f pantheon.yml ]; then
+            php=$(sed -nE "s/^php_version:[[:space:]]*[\"']?([0-9]+\.[0-9]+).*/\1/p" pantheon.yml | head -1)
+          fi
+          [ -n "$php" ] || php=8.3
+          code_paths=""
+          for d in "$webroot/modules/custom" "$webroot/profiles/custom"; do
+            if [ -d "$d" ]; then code_paths="$code_paths $d"; fi
+          done
+          if [ -d "$webroot/themes" ]; then
+            for d in "$webroot"/themes/*/; do
+              d=${d%/}
+              if [ "$(basename "$d")" != contrib ]; then code_paths="$code_paths $d"; fi
+            done
+          fi
+          read -ra code_path_list <<< "$code_paths"
+          code_paths="${code_path_list[*]}"
+          config_dir=""
+          for d in config/sync config/default config; do
+            if compgen -G "$d/*.yml" > /dev/null; then config_dir=$d; break; fi
+          done
+          commerce=false
+          if grep -q '"name": "drupal/commerce"' composer.lock 2>/dev/null; then commerce=true; fi
+
+          mode() {
+            if [[ "$SKIP " == *" $1 "* ]]; then echo off
+            elif [[ "$REQUIRED " == *" $1 "* ]]; then echo block
+            else echo "$2"; fi
+          }
+          declare -A m
+          m[phpcs]=$(mode phpcs warn)
+          m[phpstan]=$(mode phpstan warn)
+          m[yamllint]=$(mode yamllint warn)
+          m[audit]=$(mode audit warn)
+          m[secrets]=$(mode secrets warn)
+          m[phpunit]=$(mode phpunit block)
+          m[behat]=$(mode behat warn)
+          m[config]=$(mode config warn)
+          m[updatedb]=$(mode updatedb block)
+          m[cim]=$(mode cim block)
+
+          note=()
+          if [ -z "$code_paths" ]; then m[phpcs]=off; m[phpstan]=off; note+=("No custom modules or themes found: PHPCS and PHPStan have nothing to check."); fi
+          if [ -z "$config_dir" ]; then m[yamllint]=off; note+=("No config sync directory found: YAML lint skipped."); fi
+          if [ "$deploy" != true ]; then m[behat]=off; m[config]=off; m[updatedb]=off; m[cim]=off; fi
+          if [ "$event" = pr-closed ]; then for k in "${!m[@]}"; do m[$k]=off; done; fi
+
+          static=false
+          for k in phpcs phpstan yamllint audit secrets; do
+            if [ "${m[$k]}" != off ]; then static=true; fi
+          done
+
+          out event "$event"; out env "$env_name"; out php "$php"; out code_paths "$code_paths"
+          out config_dir "$config_dir"; out commerce "$commerce"; out deploy "$deploy"
+          out cleanup "$cleanup"; out static "$static"
+          for k in "${!m[@]}"; do out "$k" "${m[$k]}"; done
+
+          {
+            echo "event=$event env=${env_name:-none} code_host=$CODE_HOST php=$php commerce=$commerce"
+            echo "code paths: ${code_paths:-none}  config: ${config_dir:-none}"
+            for k in phpcs phpstan yamllint audit secrets phpunit updatedb cim config behat; do printf '  %-9s %s\n' "$k" "${m[$k]}"; done
+            for n in "${note[@]}"; do echo "note: $n"; done
+          }
+
+  static:
+    name: Code checks
+    needs: plan
+    if: needs.plan.outputs.static == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: drupal-qa-static-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    outputs:
+      results: ${{ steps.results.outputs.results }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ needs.plan.outputs.php }}
+          tools: composer:v2
+          coverage: none
+          extensions: mbstring, xml, curl, gd, zip, pdo_mysql, bcmath, soap
+
+      - name: Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Composer install
+        if: needs.plan.outputs.phpcs != 'off' || needs.plan.outputs.phpstan != 'off' || needs.plan.outputs.audit != 'off'
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist
+          if [ ! -x vendor/bin/phpcs ] || [ ! -x vendor/bin/phpstan ]; then
+            echo "::error title=drupal-qa::The QA tools are not installed. Run: composer require --dev augustash/drupal-qa"
+            exit 1
+          fi
+
+      - name: PHPCS
+        id: phpcs
+        if: needs.plan.outputs.phpcs != 'off'
+        continue-on-error: ${{ needs.plan.outputs.phpcs != 'block' }}
+        env:
+          CODE_PATHS: ${{ needs.plan.outputs.code_paths }}
+        run: |
+          # shellcheck disable=SC2086
+          vendor/bin/phpcs --standard=Drupal --extensions=php,module,inc,install,theme \
+            --exclude=Drupal.Files.LineLength --warning-severity=0 \
+            --ignore='*/contrib/*,*/node_modules/*,*/vendor/*' --report=full $CODE_PATHS
+
+      - name: PHPStan
+        id: phpstan
+        if: needs.plan.outputs.phpstan != 'off'
+        continue-on-error: ${{ needs.plan.outputs.phpstan != 'block' }}
+        env:
+          CODE_PATHS: ${{ needs.plan.outputs.code_paths }}
+        run: |
+          # A project's own phpstan.neon (or .dist) decides what to analyse.
+          # Without one, the package's defaults run against the detected paths.
+          if [ -f phpstan.neon ] || [ -f phpstan.neon.dist ] || [ -f phpstan.dist.neon ]; then
+            vendor/bin/phpstan analyse --memory-limit=-1 --no-progress --error-format=github
+          else
+            # shellcheck disable=SC2086
+            vendor/bin/phpstan analyse --memory-limit=-1 --no-progress --error-format=github \
+              --configuration="$(composer config vendor-dir)/augustash/drupal-qa/config/phpstan.neon.dist" $CODE_PATHS
+          fi
+
+      - name: YAML lint
+        id: yamllint
+        if: needs.plan.outputs.yamllint != 'off'
+        continue-on-error: ${{ needs.plan.outputs.yamllint != 'block' }}
+        env:
+          CONFIG_DIR: ${{ needs.plan.outputs.config_dir }}
+        run: |
+          command -v yamllint > /dev/null || pipx install --quiet yamllint > /dev/null
+          yamllint --format github -d "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable, braces: disable, comments-indentation: disable, empty-lines: disable, indentation: {indent-sequences: whatever}}}" "$CONFIG_DIR"
+
+      - name: Composer audit
+        id: audit
+        if: needs.plan.outputs.audit != 'off'
+        continue-on-error: ${{ needs.plan.outputs.audit != 'block' }}
+        run: composer audit --no-interaction
+
+      - name: Secret scan
+        id: secrets
+        if: needs.plan.outputs.secrets != 'off'
+        continue-on-error: ${{ needs.plan.outputs.secrets != 'block' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          # The gitleaks binary is MIT and free for organizations; the
+          # gitleaks Action needs a paid license on organization repos and
+          # errors out without one. Scans only the commits this change adds.
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP/bin" gitleaks
+          if [ -n "$BASE_SHA" ]; then
+            range="$BASE_SHA..$HEAD_SHA"
+          elif [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="$BEFORE..$AFTER"
+          else
+            range="-1"
+          fi
+          echo "Scanning commits: $range"
+          "$RUNNER_TEMP/bin/gitleaks" git --log-opts="$range" --redact --no-banner --verbose .
+
+      - name: Record results
+        id: results
+        if: always()
+        run: |
+          echo "results=phpcs=${{ steps.phpcs.outcome }} phpstan=${{ steps.phpstan.outcome }} yamllint=${{ steps.yamllint.outcome }} audit=${{ steps.audit.outcome }} secrets=${{ steps.secrets.outcome }}" >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: PHPUnit
+    needs: plan
+    if: needs.plan.outputs.phpunit != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: drupal-qa-tests-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    outputs:
+      results: ${{ steps.results.outputs.results }}
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: drupal_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ needs.plan.outputs.php }}
+          tools: composer:v2
+          coverage: none
+          extensions: mbstring, xml, curl, gd, zip, pdo_mysql, bcmath, soap, redis
+
+      - name: Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Composer install
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist
+          if [ ! -x vendor/bin/phpunit ]; then
+            echo "::error title=drupal-qa::PHPUnit is not installed. Run: composer require --dev augustash/drupal-qa"
+            exit 1
+          fi
+
+      - name: PHPUnit
+        id: phpunit
+        continue-on-error: ${{ needs.plan.outputs.phpunit != 'block' }}
+        env:
+          SIMPLETEST_DB: mysql://root:root@127.0.0.1:3306/drupal_test
+          SIMPLETEST_BASE_URL: http://localhost
+          SYMFONY_DEPRECATIONS_HELPER: disabled
+        run: |
+          # A project's own phpunit.xml(.dist) wins; otherwise the package's.
+          if [ ! -f phpunit.xml ] && [ ! -f phpunit.xml.dist ]; then
+            cp "$(composer config vendor-dir)/augustash/drupal-qa/config/phpunit.xml.dist" phpunit.xml.dist
+          fi
+          vendor/bin/phpunit --testdox 2>&1 | tee "$RUNNER_TEMP/phpunit.txt"
+          if grep -q 'No tests executed' "$RUNNER_TEMP/phpunit.txt"; then
+            echo "::error title=PHPUnit::PHPUnit ran no tests."
+            exit 1
+          fi
+
+      - name: Record results
+        id: results
+        if: always()
+        run: echo "results=phpunit=${{ steps.phpunit.outcome }}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy
+    needs: [plan, static, tests]
+    # Waits for the checks so that a required check can stop a deploy. A check
+    # that only warns never fails its job, so it never holds a deploy back.
+    if: >-
+      always()
+      && needs.plan.result == 'success'
+      && needs.plan.outputs.deploy == 'true'
+      && needs.static.result != 'failure' && needs.static.result != 'cancelled'
+      && needs.tests.result != 'failure' && needs.tests.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: drupal-qa-deploy-${{ github.event.pull_request.number || 'dev' }}
+      cancel-in-progress: false
+    outputs:
+      url: ${{ steps.site.outputs.url }}
+      results: ${{ steps.results.outputs.results }}
+    env:
+      SITE: ${{ inputs.pantheon_site }}
+      ENV_NAME: ${{ needs.plan.outputs.env }}
+      CODE_HOST: ${{ inputs.code_host }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Install Terminus
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/pantheon-systems/terminus/releases/download/${TERMINUS_VERSION}/terminus.phar" -o "$RUNNER_TEMP/bin/terminus"
+          chmod +x "$RUNNER_TEMP/bin/terminus"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to Pantheon
+        env:
+          TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+          KEY: ${{ secrets.PANTHEON_SSH_KEY }}
+        run: |
+          terminus auth:login --machine-token="$TOKEN" > /dev/null
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/pantheon && chmod 600 ~/.ssh/pantheon
+          printf '%s\n' 'Host *.drush.in' '  IdentityFile ~/.ssh/pantheon' '  IdentitiesOnly yes' \
+            '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' >> ~/.ssh/config
+
+      - name: Find the site
+        id: site
+        run: |
+          uuid=$(terminus site:info "$SITE" --field=id) || {
+            echo "::error title=drupal-qa::Pantheon site '$SITE' not found, or the machine token cannot see it."
+            exit 1
+          }
+          {
+            echo "uuid=$uuid"
+            echo "url=https://${ENV_NAME}-${SITE}.pantheonsite.io"
+            echo "remote=ssh://codeserver.dev.${uuid}@codeserver.dev.${uuid}.drush.in:2222/~/repository.git"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Pick a file to watch
+        id: marker
+        env:
+          REMOTE: ${{ steps.site.outputs.remote }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # The environment is serving this commit once a file the commit
+          # changed reads the same there as it does here.
+          prev=""
+          if [ "$CODE_HOST" = pantheon ]; then
+            branch=$ENV_NAME; if [ "$ENV_NAME" = dev ]; then branch=master; fi
+            prev=$(git ls-remote "$REMOTE" "refs/heads/$branch" 2> /dev/null | cut -f1 || true)
+          fi
+          if [ -z "$prev" ] || ! git cat-file -e "$prev^{commit}" 2>/dev/null; then
+            prev=""
+            if [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then prev=$BEFORE; fi
+            if [ -n "$BASE_SHA" ] && [ -z "$prev" ]; then prev=$BASE_SHA; fi
+          fi
+          marker=""
+          if [ -n "$prev" ]; then
+            files=$(git diff --name-only --no-renames --diff-filter=AM "$prev" HEAD -- . ':(exclude).github' ':(exclude)tests' ':(exclude)*.md' || true)
+            marker=$(echo "$files" | grep -v '^config/' | grep -E '\.(php|module|inc|install|theme|yml|twig|json|lock|js|css)$' | tail -1 || true)
+            if [ -z "$marker" ]; then marker=$(echo "$files" | sed '/^$/d' | tail -1); fi
+          fi
+          if [ -n "$marker" ]; then
+            {
+              echo "file=$marker"
+              echo "md5=$(git show "HEAD:$marker" | md5sum | cut -d' ' -f1)"
+              echo "path_b64=$(printf '%s' "$marker" | base64 -w0)"
+            } >> "$GITHUB_OUTPUT"
+            echo "Watching $marker"
+          else
+            echo "No deployable file changed; waiting on Pantheon's workflow only."
+          fi
+
+      - name: Push to Pantheon
+        id: deliver
+        if: inputs.code_host == 'pantheon'
+        env:
+          REMOTE: ${{ steps.site.outputs.remote }}
+        run: |
+          git remote add pantheon "$REMOTE"
+          if [ "$ENV_NAME" = dev ]; then
+            git fetch --quiet pantheon master
+            if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+              echo "::error title=drupal-qa::Pantheon's master has commits this branch does not, such as a dashboard commit or an Autopilot update. Merge them into GitHub first: git fetch $REMOTE master && git merge FETCH_HEAD"
+              exit 1
+            fi
+            git push pantheon HEAD:refs/heads/master
+          else
+            if ! terminus env:info "$SITE.$ENV_NAME" --field=id > /dev/null 2>&1; then
+              src=live
+              if [ "$(terminus env:info "$SITE.live" --field=initialized)" != true ]; then src=dev; fi
+              echo "Creating multidev $ENV_NAME from $src."
+              terminus multidev:create "$SITE.$src" "$ENV_NAME" || {
+                echo "::error title=drupal-qa::Could not create multidev $ENV_NAME. If the site is at its multidev limit, delete an unused one; if the site has no multidev, set multidev: false."
+                exit 1
+              }
+            fi
+            git push --force pantheon "HEAD:refs/heads/$ENV_NAME"
+          fi
+
+      - name: Wait for Pantheon to create the environment
+        id: created
+        if: inputs.code_host == 'github-app'
+        run: |
+          # Pantheon's GitHub App builds the environment itself.
+          for _ in $(seq 1 60); do
+            if terminus env:info "$SITE.$ENV_NAME" --field=id > /dev/null 2>&1; then exit 0; fi
+            sleep 15
+          done
+          echo "::error title=drupal-qa::Pantheon did not create $ENV_NAME within 15 minutes. Check the GitHub App's status on the pull request."
+          exit 1
+
+      - name: Wait until the environment serves this commit
+        id: converge
+        env:
+          MARKER: ${{ steps.marker.outputs.file }}
+          MD5: ${{ steps.marker.outputs.md5 }}
+          MARKER_B64: ${{ steps.marker.outputs.path_b64 }}
+        run: |
+          # Advisory: Pantheon intermittently reports a successful sync as
+          # failed. The file check below is the gate.
+          terminus workflow:wait "$SITE.$ENV_NAME" --max=600 || echo "::notice::workflow:wait reported a failure; checking the environment directly."
+          terminus env:wake "$SITE.$ENV_NAME" > /dev/null 2>&1 || true
+          deadline=$((SECONDS + 900))
+          if [ -n "$MARKER" ]; then
+            # Single quotes only: the code crosses terminus and SSH as one argument.
+            php_code="\$p=base64_decode('$MARKER_B64'); \$r=is_file(DRUPAL_ROOT.'/../composer.json') ? DRUPAL_ROOT.'/..' : DRUPAL_ROOT; echo is_file(\$r.'/'.\$p) ? md5_file(\$r.'/'.\$p) : 'missing';"
+            while true; do
+              got=$(terminus drush "$SITE.$ENV_NAME" -- php:eval "$php_code" 2> /dev/null | tail -1 || true)
+              if [ "$got" = "$MD5" ]; then echo "$ENV_NAME is serving $MARKER from this commit."; exit 0; fi
+              if [ $SECONDS -ge $deadline ]; then break; fi
+              sleep 15
+            done
+            echo "::error title=drupal-qa::$ENV_NAME still serves the old $MARKER after 15 minutes. Check: terminus workflow:list $SITE. If the code log shows this commit but the old code runs, push an empty commit to force a new sync."
+            exit 1
+          fi
+          until terminus drush "$SITE.$ENV_NAME" -- status --field=bootstrap 2> /dev/null | grep -qi successful; do
+            if [ $SECONDS -ge $deadline ]; then
+              echo "::error title=drupal-qa::$ENV_NAME did not answer Drush within 15 minutes."
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Database updates
+        id: updatedb
+        if: needs.plan.outputs.updatedb != 'off'
+        run: |
+          # Retried once: the first drush call after a sync is sometimes killed
+          # (exit 137) seconds in, and the same command succeeds straight after.
+          terminus drush "$SITE.$ENV_NAME" -- updatedb -y || {
+            echo "::notice::updatedb failed; retrying once."
+            sleep 20
+            terminus drush "$SITE.$ENV_NAME" -- updatedb -y
+          }
+
+      - name: Config import
+        id: cim
+        if: needs.plan.outputs.cim != 'off'
+        run: terminus drush "$SITE.$ENV_NAME" -- config:import -y
+
+      - name: Cache rebuild
+        if: needs.plan.outputs.updatedb != 'off' || needs.plan.outputs.cim != 'off'
+        run: terminus drush "$SITE.$ENV_NAME" -- cache:rebuild
+
+      - name: Config status
+        id: config
+        if: needs.plan.outputs.config != 'off'
+        continue-on-error: ${{ needs.plan.outputs.config != 'block' }}
+        run: |
+          # Over SSH, drush's own log lines ("[notice] No differences ...")
+          # arrive on stdout ahead of the JSON, so they are stripped before
+          # counting rows. Output that is not JSON is a failure, not a pass.
+          status=$(terminus drush "$SITE.$ENV_NAME" -- config:status --format=json 2> /dev/null) || {
+            echo "::error title=Config status::Could not read config status from $ENV_NAME."
+            exit 1
+          }
+          rows=$(echo "$status" | grep -vE '^[[:space:]]*\[(notice|info|warning|success|debug)\]' | jq 'length' 2> /dev/null) || {
+            echo "::error title=Config status::Unexpected config status output from $ENV_NAME:"
+            echo "$status"
+            exit 1
+          }
+          if [ "$rows" = 0 ]; then
+            echo "Config on $ENV_NAME matches the code."
+          else
+            echo "::error title=Config status::Config on $ENV_NAME differs from the code."
+            terminus drush "$SITE.$ENV_NAME" -- config:status 2> /dev/null
+            exit 1
+          fi
+
+      - name: Record results
+        id: results
+        if: always()
+        run: |
+          deliver="${{ steps.deliver.outcome }}"
+          if [ "$CODE_HOST" = github-app ]; then deliver="${{ steps.created.outcome }}"; fi
+          echo "results=deliver=$deliver converge=${{ steps.converge.outcome }} updatedb=${{ steps.updatedb.outcome }} cim=${{ steps.cim.outcome }} config=${{ steps.config.outcome }}" >> "$GITHUB_OUTPUT"
+
+  behat:
+    name: Behat
+    needs: [plan, deploy]
+    if: always() && needs.deploy.result == 'success' && needs.plan.outputs.behat != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: drupal-qa-behat-${{ github.event.pull_request.number || 'dev' }}
+      cancel-in-progress: false
+    outputs:
+      results: ${{ steps.results.outputs.results }}
+    env:
+      SITE: ${{ inputs.pantheon_site }}
+      ENV_NAME: ${{ needs.plan.outputs.env }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ needs.plan.outputs.php }}
+          tools: composer:v2
+          coverage: none
+          extensions: mbstring, xml, curl, gd, zip
+
+      - name: Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Composer install
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist
+          if [ ! -x vendor/bin/behat ]; then
+            echo "::error title=drupal-qa::Behat is not installed. Run: composer require --dev augustash/drupal-qa"
+            exit 1
+          fi
+
+      - name: Install Terminus
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/pantheon-systems/terminus/releases/download/${TERMINUS_VERSION}/terminus.phar" -o "$RUNNER_TEMP/bin/terminus"
+          chmod +x "$RUNNER_TEMP/bin/terminus"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Drush alias for the environment
+        env:
+          TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+          KEY: ${{ secrets.PANTHEON_SSH_KEY }}
+        run: |
+          # Logged-in scenarios (@api) create their users through Drush, which
+          # reaches the environment over SSH using Pantheon's own alias file.
+          terminus auth:login --machine-token="$TOKEN" > /dev/null
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/pantheon && chmod 600 ~/.ssh/pantheon
+          printf '%s\n' 'Host *.drush.in' '  IdentityFile ~/.ssh/pantheon' '  IdentitiesOnly yes' \
+            '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' >> ~/.ssh/config
+          terminus drush:aliases --only="$SITE" --type=yml --base="$GITHUB_WORKSPACE/drush" > /dev/null
+          vendor/bin/drush "@pantheon.$SITE.$ENV_NAME" status --field=bootstrap
+
+      - name: Behat
+        id: behat
+        continue-on-error: ${{ needs.plan.outputs.behat != 'block' }}
+        env:
+          URL: ${{ needs.deploy.outputs.url }}
+          COMMERCE: ${{ needs.plan.outputs.commerce }}
+        run: |
+          if [ ! -f behat.yml ] && [ ! -f behat.yml.dist ] && [ ! -f behat.yaml ] && [ ! -f behat.yaml.dist ]; then
+            cp "$(composer config vendor-dir)/augustash/drupal-qa/config/behat.yml.dist" behat.yml.dist
+          fi
+          BEHAT_PARAMS=$(jq -cn --arg url "$URL" --arg alias "@pantheon.$SITE.$ENV_NAME" \
+            '{extensions: {"Drupal\\MinkExtension": {base_url: $url}, "Drupal\\DrupalExtension": {drush: {alias: $alias}}}}')
+          export BEHAT_PARAMS
+          suite=(--suite=default)
+          if [ "$COMMERCE" = true ]; then suite=(); fi
+          vendor/bin/behat "${suite[@]}" --tags='~@wip' --format=progress --strict --no-interaction 2>&1 | tee "$RUNNER_TEMP/behat.txt"
+          if ! grep -qE '^[1-9][0-9]* scenarios? \(' "$RUNNER_TEMP/behat.txt"; then
+            echo "::error title=Behat::Behat ran no scenarios."
+            exit 1
+          fi
+
+      - name: Record results
+        id: results
+        if: always()
+        run: echo "results=behat=${{ steps.behat.outcome }}" >> "$GITHUB_OUTPUT"
+
+  cleanup:
+    name: Delete multidev
+    needs: plan
+    if: needs.plan.outputs.cleanup == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      # Same group as deploy: a pull request closed mid-build waits for the
+      # build to finish instead of deleting an environment Pantheon is creating.
+      group: drupal-qa-deploy-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    env:
+      SITE: ${{ inputs.pantheon_site }}
+      ENV_NAME: ${{ needs.plan.outputs.env }}
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Delete the multidev
+        env:
+          TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/pantheon-systems/terminus/releases/download/${TERMINUS_VERSION}/terminus.phar" -o "$RUNNER_TEMP/bin/terminus"
+          chmod +x "$RUNNER_TEMP/bin/terminus"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          terminus auth:login --machine-token="$TOKEN" > /dev/null
+          if terminus env:info "$SITE.$ENV_NAME" --field=id > /dev/null 2>&1; then
+            terminus multidev:delete "$SITE.$ENV_NAME" --delete-branch --yes
+          else
+            echo "$ENV_NAME does not exist; nothing to delete."
+          fi
+
+  summary:
+    name: Summary
+    needs: [plan, static, tests, deploy, behat]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.event != 'pr-closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Summarise the run
+        id: summary
+        env:
+          STATIC: ${{ needs.static.outputs.results }}
+          TESTS: ${{ needs.tests.outputs.results }}
+          DEPLOY: ${{ needs.deploy.outputs.results }}
+          BEHAT: ${{ needs.behat.outputs.results }}
+          URL: ${{ needs.deploy.outputs.url }}
+          ENV_NAME: ${{ needs.plan.outputs.env }}
+          DEPLOYING: ${{ needs.plan.outputs.deploy }}
+          M_PHPCS: ${{ needs.plan.outputs.phpcs }}
+          M_PHPSTAN: ${{ needs.plan.outputs.phpstan }}
+          M_YAMLLINT: ${{ needs.plan.outputs.yamllint }}
+          M_AUDIT: ${{ needs.plan.outputs.audit }}
+          M_SECRETS: ${{ needs.plan.outputs.secrets }}
+          M_PHPUNIT: ${{ needs.plan.outputs.phpunit }}
+          M_UPDATEDB: ${{ needs.plan.outputs.updatedb }}
+          M_CIM: ${{ needs.plan.outputs.cim }}
+          M_CONFIG: ${{ needs.plan.outputs.config }}
+          M_BEHAT: ${{ needs.plan.outputs.behat }}
+        run: |
+          declare -A r
+          for pair in $STATIC $TESTS $DEPLOY $BEHAT; do r[${pair%%=*}]=${pair#*=}; done
+          declare -A label=([phpcs]="PHPCS" [phpstan]="PHPStan" [yamllint]="YAML lint" [audit]="Composer audit"
+            [secrets]="Secret scan" [phpunit]="PHPUnit" [deliver]="Deliver code" [converge]="Serving this commit"
+            [updatedb]="Database updates" [cim]="Config import" [config]="Config status" [behat]="Behat")
+          mode_of() { local v="M_${1^^}"; echo "${!v:-block}"; }
+
+          rows=()
+          for k in phpcs phpstan yamllint audit secrets phpunit deliver converge updatedb cim config behat; do
+            case $k in deliver|converge) [ "$DEPLOYING" = true ] || continue; mode=block ;; *) mode=$(mode_of "$k") ;; esac
+            outcome=${r[$k]:-}
+            if [ "$mode" = off ]; then
+              continue
+            elif [ "$outcome" = success ]; then
+              state="✅ passed"
+            elif [ "$outcome" = failure ] && [ "$mode" = warn ]; then
+              state="⚠️ failed (warn only)"
+              echo "::warning title=${label[$k]}::${label[$k]} failed. It only warns; add $k to required to make it block."
+            elif [ "$outcome" = failure ]; then
+              state="❌ failed"
+            else
+              state="⏭️ did not run"
+            fi
+            rows+=("| ${label[$k]} | $state |")
+          done
+
+          {
+            echo "### Drupal QA"
+            if [ -n "$URL" ]; then echo; echo "**Environment:** [$ENV_NAME]($URL)"; fi
+            echo
+            echo "| Step | Result |"
+            echo "|---|---|"
+            printf '%s\n' "${rows[@]}"
+          } | tee "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        # The comment is a convenience: a token without pull-requests: write
+        # loses the comment, never the run.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          body="<!-- drupal-qa -->
+          $(cat "$RUNNER_TEMP/summary.md")
+
+          <sub>[Run details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})</sub>"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[] | select(.body | startswith("<!-- drupal-qa -->")) | .id' | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" > /dev/null
+          fi
