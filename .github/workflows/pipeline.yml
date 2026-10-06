@@ -715,17 +715,19 @@ jobs:
           # Drupal's own. The site's bot-bypass token, fetched with the machine
           # token CI already has, exempts these requests; a site on the older
           # CDN has none and needs none.
-          token=""
-          if terminus self:plugin:install pantheon-systems/terminus-gcdn-plugin > /dev/null 2>&1; then
-            token=$(terminus gcdn:bot-bypass "$SITE" --format=json --fields=role,token 2> /dev/null \
-              | jq -r '.[] | select(.role == "current") | .token' 2> /dev/null || true)
-          fi
+          # self:plugin:install exits non-zero when the plugin is already there,
+          # so its exit status says nothing about whether the command exists.
+          terminus self:plugin:install pantheon-systems/terminus-gcdn-plugin > /dev/null 2>&1 || true
+          token=$(terminus gcdn:bot-bypass "$SITE" --format=json --fields=role,token 2> /dev/null \
+            | jq -r '.[] | select(.role == "current") | .token' 2> /dev/null || true)
           header=()
           if [ -n "$token" ]; then
             echo "::add-mask::$token"
             header=(-H "x-pantheon-bot-bypass: $token")
           fi
-          if curl -sI "${header[@]}" "$URL/" | grep -qi '^cf-mitigated:'; then
+          # A GET, like Behat's own requests: the challenge is score based,
+          # and a lone HEAD request can slip through without a token.
+          if curl -s -D - -o /dev/null "${header[@]}" "$URL/" | grep -qi '^cf-mitigated:'; then
             echo "::error title=Behat::Pantheon's bot protection challenges requests from CI, so no test can reach the site. Check that terminus gcdn:bot-bypass $SITE returns a token for this machine token."
             exit 1
           fi
