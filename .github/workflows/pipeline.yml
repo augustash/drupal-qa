@@ -702,15 +702,27 @@ jobs:
           URL: ${{ needs.deploy.outputs.url }}
           COMMERCE: ${{ needs.plan.outputs.commerce }}
         run: |
-          if [ ! -f behat.yml ] && [ ! -f behat.yml.dist ] && [ ! -f behat.yaml ] && [ ! -f behat.yaml.dist ]; then
-            cp "$(composer config vendor-dir)/augustash/drupal-qa/config/behat.yml.dist" behat.yml.dist
+          base=""
+          for f in behat.yml behat.yaml behat.yml.dist behat.yaml.dist; do
+            if [ -f "$f" ]; then base=$f; break; fi
+          done
+          if [ -z "$base" ]; then
+            base=behat.yml.dist
+            cp "$(composer config vendor-dir)/augustash/drupal-qa/config/behat.yml.dist" "$base"
           fi
-          BEHAT_PARAMS=$(jq -cn --arg url "$URL" --arg alias "@pantheon.$SITE.$ENV_NAME" \
-            '{extensions: {"Drupal\\MinkExtension": {base_url: $url}, "Drupal\\DrupalExtension": {drush: {alias: $alias}}}}')
-          export BEHAT_PARAMS
+          # Behat applies BEHAT_PARAMS before the config file, so a project's
+          # base_url would win over it. A config that imports the project's
+          # and sets the environment on top wins instead. It sits in the
+          # project root so %paths.base% still means the project.
+          mink=Drupal\\MinkExtension
+          if grep -q 'Behat\\MinkExtension' "$base"; then mink=Behat\\MinkExtension; fi
+          printf '%s\n' "imports:" "  - $base" "default:" "  extensions:" \
+            "    $mink:" "      base_url: '$URL'" \
+            "    Drupal\\DrupalExtension:" "      drush:" "        alias: '@pantheon.$SITE.$ENV_NAME'" > behat.drupal-qa.yml
+          cat behat.drupal-qa.yml
           suite=(--suite=default)
           if [ "$COMMERCE" = true ]; then suite=(); fi
-          vendor/bin/behat "${suite[@]}" --tags='~@wip' --format=progress --strict --no-interaction 2>&1 | tee "$RUNNER_TEMP/behat.txt"
+          vendor/bin/behat --config=behat.drupal-qa.yml "${suite[@]}" --tags='~@wip' --format=progress --strict --no-interaction 2>&1 | tee "$RUNNER_TEMP/behat.txt"
           if ! grep -qE '^[1-9][0-9]* scenarios? \(' "$RUNNER_TEMP/behat.txt"; then
             echo "::error title=Behat::Behat ran no scenarios."
             exit 1

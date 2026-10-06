@@ -1,5 +1,7 @@
 # drupal-qa default Behat config, used when a project has no behat.yml of its
-# own. CI supplies the environment's URL and Drush alias through BEHAT_PARAMS.
+# own. CI layers the environment's URL and Drush alias on top through a config
+# that imports this one: Behat applies BEHAT_PARAMS before the config file, so
+# a base_url here would win over anything passed in the environment.
 #
 # Scenarios run over HTTP against the deployed environment. Scenarios tagged
 # @api also create users and content there, through Drush over SSH.
@@ -27,12 +29,10 @@ default:
   extensions:
     Drupal\MinkExtension:
       browserkit_http: ~
-      base_url: 'http://localhost'
     Drupal\DrupalExtension:
       blackbox: ~
+      # Drupal Extension 5.x: 6.x cannot create users through Drush.
       api_driver: drush
-      drush:
-        alias: '@self'
       selectors:
         message_selector: '.messages'
         error_message_selector: '.messages--error'

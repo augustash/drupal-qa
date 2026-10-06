@@ -17,7 +17,7 @@
         "php": ">=8.2",
         "behat/mink": "^1.11",
         "drupal/coder": "^8.3.24 || ^9.0",
-        "drupal/drupal-extension": "^5.3 || ^6.0",
+        "drupal/drupal-extension": "^5.4",
         "mglaman/phpstan-drupal": "^2.0",
         "phpspec/prophecy-phpunit": "^2.5",
         "phpstan/extension-installer": "^1.4",
