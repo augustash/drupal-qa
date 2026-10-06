@@ -690,7 +690,9 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/pantheon && chmod 600 ~/.ssh/pantheon
           printf '%s\n' 'Host *.drush.in' '  IdentityFile ~/.ssh/pantheon' '  IdentitiesOnly yes' \
             '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' >> ~/.ssh/config
-          terminus drush:aliases --only="$SITE" --type=yml --base="$GITHUB_WORKSPACE/drush" > /dev/null
+          # Default location (~/.drush): terminus also writes a drush.yml and an
+          # alias policy there, and the project's own drush/ stays untouched.
+          terminus drush:aliases --only="$SITE" --type=yml > /dev/null
           vendor/bin/drush "@pantheon.$SITE.$ENV_NAME" status --field=bootstrap
 
       - name: Behat
