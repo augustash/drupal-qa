@@ -710,16 +710,40 @@ jobs:
             base=behat.yml.dist
             cp "$(composer config vendor-dir)/augustash/drupal-qa/config/behat.yml.dist" "$base"
           fi
+          # Pantheon's next-generation CDN challenges automated traffic, which
+          # turns every request into a 403 that a test cannot tell from
+          # Drupal's own. The site's bot-bypass token, fetched with the machine
+          # token CI already has, exempts these requests; a site on the older
+          # CDN has none and needs none.
+          token=""
+          if terminus self:plugin:install pantheon-systems/terminus-gcdn-plugin > /dev/null 2>&1; then
+            token=$(terminus gcdn:bot-bypass "$SITE" --format=json --fields=role,token 2> /dev/null \
+              | jq -r '.[] | select(.role == "current") | .token' 2> /dev/null || true)
+          fi
+          header=()
+          if [ -n "$token" ]; then
+            echo "::add-mask::$token"
+            header=(-H "x-pantheon-bot-bypass: $token")
+          fi
+          if curl -sI "${header[@]}" "$URL/" | grep -qi '^cf-mitigated:'; then
+            echo "::error title=Behat::Pantheon's bot protection challenges requests from CI, so no test can reach the site. Check that terminus gcdn:bot-bypass $SITE returns a token for this machine token."
+            exit 1
+          fi
+
           # Behat applies BEHAT_PARAMS before the config file, so a project's
           # base_url would win over it. A config that imports the project's
           # and sets the environment on top wins instead. It sits in the
           # project root so %paths.base% still means the project.
           mink=Drupal\\MinkExtension
           if grep -q 'Behat\\MinkExtension' "$base"; then mink=Behat\\MinkExtension; fi
-          printf '%s\n' "imports:" "  - $base" "default:" "  extensions:" \
-            "    $mink:" "      base_url: '$URL'" \
-            "    Drupal\\DrupalExtension:" "      drush:" "        alias: '@pantheon.$SITE.$ENV_NAME'" > behat.drupal-qa.yml
-          cat behat.drupal-qa.yml
+          {
+            printf '%s\n' "imports:" "  - $base" "default:" "  extensions:" "    $mink:" "      base_url: '$URL'"
+            if [ -n "$token" ] && [ "$mink" = 'Drupal\MinkExtension' ]; then
+              printf '%s\n' "      browserkit_http:" "        guzzle_request_options:" "          allow_redirects: false" \
+                "          cookies: true" "          headers:" "            x-pantheon-bot-bypass: '$token'"
+            fi
+            printf '%s\n' "    Drupal\\DrupalExtension:" "      drush:" "        alias: '@pantheon.$SITE.$ENV_NAME'"
+          } > behat.drupal-qa.yml
           suite=(--suite=default)
           if [ "$COMMERCE" = true ]; then suite=(); fi
           vendor/bin/behat --config=behat.drupal-qa.yml "${suite[@]}" --tags='~@wip' --format=progress --strict --no-interaction 2>&1 | tee "$RUNNER_TEMP/behat.txt"

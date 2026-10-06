@@ -47,6 +47,26 @@ class FeatureContext extends RawDrupalContext {
   }
 
   /**
+   * Fails a step whose response came from a CDN bot challenge.
+   *
+   * A challenged request is a 403 that reads exactly like Drupal denying
+   * access, so "anonymous users get 403" would pass without reaching Drupal.
+   *
+   * @AfterStep
+   */
+  public function failOnCdnChallenge(AfterStepScope $scope): void {
+    try {
+      $headers = array_change_key_case($this->getSession()->getResponseHeaders());
+    }
+    catch (\Throwable) {
+      return;
+    }
+    if (($headers['cf-mitigated'][0] ?? '') === 'challenge') {
+      throw new \RuntimeException('The CDN answered this request with a bot challenge, so the test never reached Drupal. Send the site\'s bot-bypass token (x-pantheon-bot-bypass).');
+    }
+  }
+
+  /**
    * Asserts a CSS selector matches an element on the page.
    *
    * @Then I should see the :selector element
