@@ -1,935 +1,339 @@
 # drupal-qa
 
-Reusable CI/QA toolchain for Drupal 10+ projects. One `composer require` gives you automated testing, code quality checks, AI-powered PR reviews, and GitHub Actions workflows for Pantheon — with sensible defaults that work out of the box.
+CI for Drupal sites on Pantheon. Every pull request gets code checks and its own
+multidev; every merge deploys to dev. Each deploy then waits until Pantheon is
+actually serving the new code before it runs database updates, imports config and
+smoke-tests the site.
 
-## Table of Contents
-
-- [What You Get](#what-you-get)
-- [Quick Setup](#quick-setup)
-- [How It Works](#how-it-works)
-- [Gradual Adoption](#gradual-adoption)
-- [AI PR Reviews](#ai-pr-reviews)
-- [Using AI to Generate Tests](#using-ai-to-generate-tests)
-- [Debugging CI Failures](#debugging-ci-failures)
-
-**Reference:**
-
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [What's Included](#whats-included)
-- [GitHub Actions Setup](#github-actions-setup)
-- [Workflow Inputs](#workflow-inputs)
-- [Adding Project-Specific Tests](#adding-project-specific-tests)
-- [Customizing Configs](#customizing-configs)
-- [Optional Extras](#optional-extras)
-- [Opinionated Defaults](#opinionated-defaults)
-- [Upgrading](#upgrading)
+- [Install](#install)
+- [What runs](#what-runs)
+- [Options](#options)
+- [Install with Claude Code](#install-with-claude-code)
+- [Pantheon's GitHub integration and drupal-qa](#pantheons-github-integration-and-drupal-qa)
+- [Writing your own Behat tests](#writing-your-own-behat-tests)
 - [Troubleshooting](#troubleshooting)
+- [Upgrading from v1](#upgrading-from-v1)
 
 ## Install
 
-```bash
-composer require --dev thronedigital/drupal-qa
-```
-
-Or run the [setup script](#quick-setup) which does this and more.
-
-## What You Get
-
-- **Automated PR checks** — PHPCS, PHPStan, YAML lint, security audit, PHPUnit on every pull request
-- **Secret scanning** — Gitleaks scans every PR for accidentally committed API keys, passwords, tokens, and credentials before they reach production
-- **Preview environments** — Pantheon multidev created automatically for each PR
-- **Smoke tests** — Behat tests verify login, access control, homepage, and commerce flows
-- **Pre-commit hooks** — GrumPHP catches debug code and coding violations before you push
-- **AI PR reviews** — GitHub Copilot reviews every PR for Drupal-specific issues (optional)
-- **AI coding instructions** — CLAUDE.md scaffolded with Drupal best practices for Claude Code, Cursor, etc.
-- **Ready-to-use AI prompts** — generate unit tests, fix violations, debug CI failures
-
-## Quick Setup
-
-### Option A: Interactive Setup Script
-
-Run this from your Drupal project root — it handles everything:
+**1. Add the package:**
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/DanePete/drupal-qa/main/scripts/setup.sh)
+composer require --dev augustash/drupal-qa
 ```
 
-The script will:
+It brings PHPCS (Drupal standard), PHPStan with `phpstan-drupal`, PHPUnit and
+Behat. You don't need to copy any config into the project. When the project has
+its own `phpunit.xml`, `phpstan.neon` or `behat.yml`, CI uses that. Otherwise it
+uses the package's defaults.
 
-1. Ask for your Pantheon site name, UUID, and preferences
-2. Generate all 4 workflow files
-3. Create a FeatureContext extending the base
-4. Add `.dist` files to `.gitignore`
-5. Add `thronedigital/drupal-qa` to `allowed-packages` in your `composer.json`
-6. Run `composer require --dev thronedigital/drupal-qa`
-
-The only manual step left is adding GitHub secrets (see [Required Secrets](#required-secrets)).
-
-### Option B: AI Prompt
-
-Copy this prompt into an AI coding tool that can read your codebase (Claude Code, Cursor, Copilot, Windsurf, etc.):
-
-```text
-I'm setting up a Drupal project that deploys to Pantheon. I need you to generate
-the GitHub Actions workflow files and composer.json changes to use the
-thronedigital/drupal-qa package.
-
-Here's my project info:
-- Pantheon site machine name: [YOUR_SITE_NAME]
-- Pantheon site UUID: [found in dashboard URL: dashboard.pantheon.io/workspace/.../cms-site/{UUID}/... or via `terminus site:info SITE --field=id`]
-- PHP version: [8.3]
-- PHPCS should block PRs: [yes/no]
-- PHPStan should block PRs: [yes/no]
-- Custom theme paths to scan: [e.g. web/themes/custom/]
-- Has Drupal Commerce: [yes/no]
-- Run Behat tests on multidev: [yes/no]
-
-Generate the following files:
-
-1. `.github/workflows/pr-checks.yml` — calls DanePete/drupal-qa pr-checks workflow
-2. `.github/workflows/deploy-pantheon.yml` — calls DanePete/drupal-qa deploy workflow
-3. `.github/workflows/multidev.yml` — calls DanePete/drupal-qa multidev workflow
-4. `.github/workflows/multidev-cleanup.yml` — calls DanePete/drupal-qa cleanup workflow
-5. `tests/behat/bootstrap/FeatureContext.php` — extends DrupalQa base context
-6. Show me the composer.json changes needed (add thronedigital/drupal-qa to
-   require-dev and allowed-packages)
-7. Add the scaffolded .dist files to .gitignore (behat.yml.dist, grumphp.yml.dist,
-   phpstan.neon.dist, phpunit.xml.dist)
-
-Reference the workflow inputs documented at:
-https://github.com/DanePete/drupal-qa#workflow-inputs
-```
-
-### Option C: Manual Setup
-
-See [Installation](#installation) and [GitHub Actions Setup](#github-actions-setup) below.
-
-## How It Works
-
-Once installed, this is the day-to-day workflow:
-
-### 1. Create a branch
-
-```bash
-git checkout -b feature/my-feature
-```
-
-Never work directly on `main`. Every change goes through a branch.
-
-### 2. Write your code
-
-GrumPHP runs automatically on every commit. If you accidentally leave a `var_dump` or violate coding standards, it catches it before you push.
-
-### 3. Push and open a PR
-
-```bash
-git push -u origin feature/my-feature
-```
-
-Open a pull request on GitHub. Three things happen automatically:
-
-- **PR Checks** — runs PHPCS, PHPStan, YAML lint, Composer audit, Gitleaks secret scanning, and PHPUnit tests
-- **Multidev** — creates a Pantheon preview environment (`pr-123`) with your code, posts the URL as a PR comment
-- **AI Review** — if Copilot is enabled, it reviews the diff for Drupal-specific issues
-
-### 4. Review and test
-
-- Click the multidev URL in the PR comment to test your changes on a real environment
-- Review the PR check results — fix any failures
-- Behat smoke tests run automatically against the multidev (login, access control, homepage)
-- Team reviews the code
-
-### 5. Merge
-
-Merge the PR into `main`. Three things happen automatically:
-
-- **Deploy** — code is pushed to Pantheon dev environment
-- **Post-deploy** — runs `drush updatedb`, `drush config:import`, `drush cache:rebuild`
-- **Cleanup** — the multidev environment is deleted
-
-### 6. Promote
-
-Promote through Pantheon environments as usual: dev → test → live.
-
-### What runs where
-
-| Event | What happens |
-| ----- | ------------ |
-| `git commit` | GrumPHP checks for debug code and PHPCS violations |
-| PR opened/updated | PHPCS, PHPStan, YAML lint, security audit, secret scanning, PHPUnit |
-| PR opened/updated | Pantheon multidev created, Behat smoke tests run against it |
-| PR opened/updated | Copilot AI review (if enabled) |
-| PR merged to main | Deploy to Pantheon dev, run drush commands, validate config sync |
-| PR closed | Multidev environment deleted |
-
-## Gradual Adoption
-
-When you first install this on an existing project, you'll likely have PHPCS and PHPStan violations. The `phpcs_required` and `phpstan_required` flags let you adopt gradually:
+**2. Commit `.github/workflows/drupal-qa.yml`:**
 
 ```yaml
-# Day 1: report violations but don't block anything
-phpcs_required: false
-phpstan_required: false
+name: Drupal QA
 
-# After cleaning up PHPCS violations: start enforcing
-phpcs_required: true
-phpstan_required: false
-
-# After cleaning up PHPStan violations: full enforcement
-phpcs_required: true
-phpstan_required: true
-```
-
-When set to `false`, violations show as warnings in the PR checks but won't block the merge.
-
-To change these, just edit the value in your `.github/workflows/pr-checks.yml` (and `deploy-pantheon.yml` if you have one) and commit. It's one line.
-
-**AI prompt to clean up violations:**
-
-```text
-Run `./vendor/bin/phpcs --standard=Drupal --extensions=php,module,inc,install,theme
-web/modules/custom/` and fix every violation. Group fixes into logical commits
-(one per module or one per violation type). Don't change any logic — only
-formatting, spacing, docblocks, and naming conventions.
-```
-
-```text
-Run `./vendor/bin/phpstan analyse --configuration=phpstan.neon --no-progress` and
-fix every error. For each fix, explain what was wrong and why the fix is correct.
-Don't suppress errors with @phpstan-ignore unless there's genuinely no other option.
-```
-
-## AI PR Reviews
-
-The package scaffolds a `.github/copilot-instructions.md` that tells GitHub Copilot how to review PRs for this project:
-
-- Deprecated Drupal API usage
-- Security issues (XSS, SQL injection, missing access checks)
-- `\Drupal::` static calls that should use dependency injection
-- Debug code left behind (ksm, kint, var_dump)
-- Performance issues (entity loads in loops, missing caching)
-- Missing config schema, missing services.yml entries
-- Hardcoded credentials or API keys
-
-This is **optional** and requires a GitHub Copilot Business or Enterprise subscription. To enable: go to your repo's **Settings > Copilot > Code review** and turn it on. Then assign `@copilot` as a reviewer on any PR, or set up a ruleset to do it automatically. The instructions file works automatically once Copilot code review is enabled — no extra setup needed.
-
-It also scaffolds a `CLAUDE.md` with Drupal-specific instructions for Claude Code — dependency injection rules, security checklist, testing patterns, config management, drush commands, and code style guidelines. Any AI tool that reads `CLAUDE.md` will know how to work with Drupal projects correctly.
-
-## Using AI to Generate Tests
-
-These prompts work with any AI coding tool that can read your codebase (Claude Code, Cursor, Copilot, Windsurf, etc.).
-
-**Find what to test:**
-
-```text
-Look at my custom modules in web/modules/custom/. For each module, identify
-services, plugins, and utility classes that have testable business logic.
-Rank them by complexity and tell me which ones would benefit most from
-unit tests. Skip simple CRUD or pass-through services.
-```
-
-**Generate tests for a single file:**
-
-```text
-Read web/modules/custom/my_module/src/Service/PriceCalculator.php. Write a
-PHPUnit unit test for this file. Mock all constructor dependencies. Test
-every public method with normal input, edge cases, and expected failures.
-Put the test at web/modules/custom/my_module/tests/src/Unit/Service/PriceCalculatorTest.php.
-```
-
-**Generate tests for a specific service:**
-
-```text
-Read web/modules/custom/my_module/src/Service/MyService.php and generate
-PHPUnit unit tests for it. The test should:
-- Extend Drupal\Tests\UnitTestCase
-- Live at web/modules/custom/my_module/tests/src/Unit/Service/MyServiceTest.php
-- Mock all injected dependencies
-- Test each public method including edge cases
-- Follow Drupal coding standards
-```
-
-**Generate tests for a single module:**
-
-```text
-Read everything in web/modules/custom/my_module/. Understand what the module
-does, then write unit tests for every service and plugin that has real logic.
-Put tests in web/modules/custom/my_module/tests/src/Unit/ with the correct
-namespaces. Skip anything that's just glue code with no logic to test.
-```
-
-**Generate tests for all modules:**
-
-```text
-Read all custom modules in web/modules/custom/. For each module, generate
-unit tests for every service and plugin that has logic worth testing. Put
-each test in the correct namespace under that module's tests/src/Unit/.
-Mock dependencies using PHPUnit mock builder or Prophecy. Skip classes
-that are just wiring (empty constructors, single-line delegation).
-```
-
-**Generate tests based on existing patterns:**
-
-```text
-Look at the existing unit tests in web/modules/custom/ to understand the
-testing patterns and style used in this project. Then find custom modules
-that don't have tests yet and generate tests that follow the same patterns.
-```
-
-**Generate Behat features from manual QA steps:**
-
-```text
-I manually test this site by doing the following:
-1. Log in as an admin
-2. Go to /admin/commerce/orders and verify the page loads
-3. Create a test order and verify it appears in the list
-4. Log out and verify I can't access /admin
-
-Convert these manual steps into Behat .feature files using Gherkin syntax.
-Use step definitions from drupal/drupal-extension and drevops/behat-steps.
-Put the files in tests/behat/features/.
-```
-
-**Write Kernel tests for database-dependent code:**
-
-```text
-Read web/modules/custom/my_module/src/Service/OrderLookupService.php. This
-service queries the database so it needs a Kernel test, not a Unit test.
-Write a KernelTestBase test that:
-- Extends Drupal\Tests\my_module\Kernel\MyModuleKernelTestBase (or Drupal\KernelTests\KernelTestBase)
-- Lives at web/modules/custom/my_module/tests/src/Kernel/Service/OrderLookupServiceTest.php
-- Enables required modules in $modules
-- Creates test entities in setUp()
-- Tests the actual queries return correct results
-```
-
-**Test Drupal plugins (blocks, conditions, field formatters):**
-
-```text
-Read web/modules/custom/my_module/src/Plugin/. For each plugin, write a
-unit test that:
-- Verifies the plugin annotation/attribute has all required properties
-- Tests the build/evaluate/viewElements method with mocked dependencies
-- Tests access control if the plugin has it
-- Tests configuration form defaults
-Put tests at web/modules/custom/my_module/tests/src/Unit/Plugin/
-```
-
-**Test event subscribers:**
-
-```text
-Read web/modules/custom/my_module/src/EventSubscriber/. For each subscriber:
-- Test that getSubscribedEvents() returns the correct event mappings
-- Test each handler method with a mocked event object
-- Test that the subscriber modifies the event correctly
-- Test edge cases (empty data, missing fields, etc.)
-```
-
-**Test form validation logic:**
-
-```text
-Read the custom forms in web/modules/custom/my_module/src/Form/. For each
-form that has validation logic in validateForm(), write tests that:
-- Submit valid data and verify no errors
-- Submit invalid data and verify the correct error messages
-- Test boundary values and edge cases
-- Mock any services the form injects
-```
-
-**Test access control:**
-
-```text
-Read all custom routes in web/modules/custom/my_module/my_module.routing.yml
-and the corresponding access check classes. Write tests that verify:
-- Anonymous users are denied where expected
-- Authenticated users with correct permissions are allowed
-- Users without the right role/permission are denied
-- Custom access checkers return the correct AccessResult
-```
-
-**Test migration plugins:**
-
-```text
-Read web/modules/custom/my_module/src/Plugin/migrate/. For each process
-plugin, write a unit test that:
-- Tests transform() with normal input
-- Tests transform() with empty/null input
-- Tests transform() with malformed input
-- Verifies MigrateSkipRowException is thrown when appropriate
-```
-
-**Generate tests for REST/API endpoints:**
-
-```text
-Read the custom REST resources or controllers in web/modules/custom/my_module/.
-Write tests that verify:
-- Correct response codes (200, 403, 404, 422)
-- Response body structure matches expected schema
-- Authentication/authorization is enforced
-- Invalid input returns proper error responses
-```
-
-**Test cron and queue workers:**
-
-```text
-Read web/modules/custom/my_module/src/Plugin/QueueWorker/. For each worker:
-- Test processItem() with valid data
-- Test processItem() with invalid data (should it throw or skip?)
-- Test that RequeueException is thrown when appropriate
-- Mock any external services the worker calls
-Also check hook_cron implementations in my_module.module and test them.
-```
-
-**Security-focused test generation:**
-
-```text
-Read all custom modules in web/modules/custom/. For each module, write tests
-focused specifically on security:
-- Test that all forms sanitize input properly
-- Test that SQL queries use parameterized placeholders (no string concat)
-- Test that routes return 403 for unauthorized users
-- Test that any user-facing output is escaped
-- Test that file upload handlers validate extensions and MIME types
-```
-
-**Audit existing test coverage:**
-
-```text
-Compare the custom modules in web/modules/custom/ against the test files
-in each module's tests/ directory. Give me a coverage report showing:
-- Modules with no tests at all
-- Services/plugins that exist but have no corresponding test
-- Test files that exist but may be outdated (testing methods that no longer exist)
-```
-
-## Debugging CI Failures
-
-**AI prompt when a workflow fails:**
-
-```text
-My GitHub Actions PR check failed. Here's the error output:
-
-[paste the failed step output here]
-
-Tell me what went wrong, how to fix it, and whether this is a real issue
-in my code or a config problem with drupal-qa. If it's a drupal-qa problem,
-I'll report it at https://github.com/DanePete/drupal-qa/issues
-```
-
-**AI prompt to add missing Behat steps:**
-
-```text
-My Behat test failed with "step not defined" errors. Here are the undefined steps:
-
-[paste the undefined step errors here]
-
-Tell me which drevops/behat-steps trait I need to add to my FeatureContext,
-or write a custom step definition if no existing trait covers it.
-```
-
----
-
-## Reference
-
-Everything below is reference material for manual setup, customization, and troubleshooting.
-
-## Prerequisites
-
-- A Drupal 10+ project using Composer
-- A Pantheon hosting account (for deploy/multidev workflows)
-- A GitHub repository
-- PHP 8.2+
-
-## Installation
-
-```bash
-composer require --dev thronedigital/drupal-qa
-```
-
-Add the package to your `allowed-packages` in `composer.json`:
-
-```json
-{
-  "extra": {
-    "drupal-scaffold": {
-      "allowed-packages": [
-        "thronedigital/drupal-qa"
-      ]
-    }
-  }
-}
-```
-
-Run `composer install` — the following files will be scaffolded to your project root:
-
-- `phpunit.xml.dist` — PHPUnit config with auto-discovery of custom module tests
-- `phpstan.neon.dist` — PHPStan level 1, scans `web/modules/custom/` and `web/themes/`
-- `grumphp.yml.dist` — pre-commit hooks (debug function blacklist, PHPCS, PHPStan)
-- `behat.yml.dist` — Behat config with `BEHAT_BASE_URL` env var support
-- `.github/copilot-instructions.md` — Drupal-specific AI review instructions
-- `CLAUDE.md` — Drupal coding instructions for Claude Code
-
-Add the scaffolded `.dist` files to your `.gitignore` — they're regenerated on every `composer install`:
-
-```text
-/behat.yml.dist
-/grumphp.yml.dist
-/phpstan.neon.dist
-/phpunit.xml.dist
-```
-
-## What's Included
-
-### Dev Dependencies
-
-All pulled in automatically:
-
-- `drupal/coder` — PHPCS Drupal coding standards
-- `phpstan/phpstan` + `mglaman/phpstan-drupal` — static analysis
-- `phpunit/phpunit` — unit and kernel testing
-- `phpro/grumphp` — pre-commit hooks
-- `behat/behat` + `drupal/drupal-extension` — behavioral testing
-- `drevops/behat-steps` — 40+ reusable Behat step definition traits
-- `drevops/behat-screenshot` — automatic screenshots on Behat failures
-
-### Generic Smoke Tests
-
-**PHPUnit** (run automatically via `drupal-qa` test suite):
-
-- `ComposerValidationTest` — validates composer.json, checks local patches exist
-- `ModuleInfoTest` — validates all custom module .info.yml files
-- `DrupalBootstrapTest` — confirms PHPUnit can bootstrap Drupal
-
-**Behat** (tagged `@drupal-qa`):
-
-- `authentication.feature` — login page, admin access denied, authenticated profile
-- `access_control.feature` — admin routes blocked for anonymous
-- `content_pages.feature` — homepage loads, 404 works
-- `cart.feature` (commerce) — cart page, empty cart message
-- `catalog.feature` (commerce) — product listing loads
-
-## GitHub Actions Setup
-
-### 1. PR Checks
-
-Create `.github/workflows/pr-checks.yml`:
-
-```yaml
-name: PR Checks
 on:
   pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
-jobs:
-  checks:
-    uses: DanePete/drupal-qa/.github/workflows/pr-checks.yml@v1
-    with:
-      phpcs_required: false    # set true when codebase is clean
-      phpstan_required: false  # set true when codebase is clean
-    secrets:
-      PANTHEON_SSH_KEY: ${{ secrets.PANTHEON_SSH_KEY }}
-      PANTHEON_MACHINE_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
-```
-
-### 2. Deploy to Pantheon
-
-Create `.github/workflows/deploy-pantheon.yml`:
-
-```yaml
-name: Deploy
-on:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [main]
+
 jobs:
-  deploy:
-    uses: DanePete/drupal-qa/.github/workflows/deploy-pantheon.yml@v1
+  qa:
+    uses: augustash/drupal-qa/.github/workflows/pipeline.yml@v2
     with:
-      pantheon_site: my-site-name
-      pantheon_site_id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    secrets:
-      PANTHEON_SSH_KEY: ${{ secrets.PANTHEON_SSH_KEY }}
-      PANTHEON_MACHINE_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+      pantheon_site: my-site
+    secrets: inherit
 ```
 
-### 3. Multidev Per PR
+**3. Add two secrets** under *Settings → Secrets and variables → Actions*. If you
+add them once at organization level, every repository in the org can use them.
 
-Create `.github/workflows/multidev.yml`:
+| Secret | What it is |
+|---|---|
+| `PANTHEON_MACHINE_TOKEN` | Pantheon dashboard → your account → *Machine Tokens*. |
+| `PANTHEON_SSH_KEY` | The private half of a key on a Pantheon account that can reach the site. Make it RSA (`ssh-keygen -t rsa -b 4096 -m PEM`), because Terminus refuses ed25519 keys. |
+
+Outside the `augustash` organization, `secrets: inherit` doesn't cross
+organizations, so pass the two secrets by name instead:
 
 ```yaml
-name: Multidev
-on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
-jobs:
-  multidev:
-    uses: DanePete/drupal-qa/.github/workflows/multidev.yml@v1
-    with:
-      pantheon_site: my-site-name
-      pantheon_site_id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
     secrets:
-      PANTHEON_SSH_KEY: ${{ secrets.PANTHEON_SSH_KEY }}
       PANTHEON_MACHINE_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+      PANTHEON_SSH_KEY: ${{ secrets.PANTHEON_SSH_KEY }}
 ```
 
-### 4. Multidev Cleanup
+That's the whole install. Open a pull request to see it run.
 
-Create `.github/workflows/multidev-cleanup.yml`:
+## What runs
+
+| When | What happens |
+|---|---|
+| A pull request is opened or pushed | Code checks and PHPUnit run first. The code then goes to multidev `pr-N`, created from live the first time. drupal-qa waits until `pr-N` is serving the new code, then runs `updatedb`, `config:import` and `cache:rebuild`, checks `config:status` and runs Behat. The PR gets a comment with the URL and a results table. |
+| The default branch is pushed (a merge) | The same steps, against `dev`. |
+| A pull request is closed | `pr-N` is deleted. |
+
+**What it checks:** PHPCS on your custom modules, profiles and every non-contrib
+theme; PHPStan; yamllint on the config sync directory (syntax errors and duplicate keys, which stop an import); `composer audit`; a
+[gitleaks](https://github.com/gitleaks/gitleaks) scan of the commits the change
+adds; PHPUnit (unit, kernel and the package's own smoke tests); and Behat against
+the deployed environment.
+
+Some things it guarantees:
+
+- **Nothing reports green without running.** A step that crashes or runs zero tests
+  counts as failed. A check that only warns still shows ⚠️ in the run summary and
+  in an annotation; it never shows as a pass.
+- **It doesn't race Pantheon.** Pantheon's code log and workflow status both say a
+  deploy is done before the container serves the new files. So drupal-qa picks a
+  file the commit changed and polls its hash on the environment until it matches.
+  Only then does it run `updatedb` and `config:import`.
+- **Multidev builds queue; they never cancel.** Cancelling `multidev:create` part
+  way through leaves a half-built environment that Pantheon can't roll back. A new
+  push waits for the build already running, and so does closing the PR.
+- **Pantheon's bot protection doesn't break the smoke tests.** Pantheon's
+  next-generation CDN challenges automated traffic. That challenge is a 403 that
+  looks exactly like Drupal denying access. CI fetches the site's bot-bypass token
+  with the machine token it already has, and sends it on every Behat request. If a
+  request is challenged anyway, the step fails instead of passing.
+
+## Options
+
+Every option has a default. Add one only when you want to change it:
 
 ```yaml
-name: Multidev Cleanup
-on:
-  pull_request:
-    branches: [main]
-    types: [closed]
-jobs:
-  cleanup:
-    uses: DanePete/drupal-qa/.github/workflows/multidev-cleanup.yml@v1
     with:
-      pantheon_site: my-site-name
-    secrets:
-      PANTHEON_MACHINE_TOKEN: ${{ secrets.PANTHEON_MACHINE_TOKEN }}
+      pantheon_site: my-site
+      required: phpcs phpunit   # these block a merge or deploy instead of warning
+      skip: behat               # these don't run at all
+      code_host: github-app     # Pantheon's GitHub App deploys this site; see below
+      multidev: false           # the site has no multidev: pull requests get checks only
 ```
 
-### Required Secrets
+| Option | Default | Meaning |
+|---|---|---|
+| `pantheon_site` | none | The site's machine name. Not needed with `code_host: none`. |
+| `required` | empty | Checks that fail the run instead of warning. |
+| `skip` | empty | Steps that don't run. |
+| `code_host` | `pantheon` | `pantheon`: drupal-qa pushes the code. `github-app`: Pantheon's GitHub App pushes it, and drupal-qa does the rest. `none`: checks only, nothing deployed. |
+| `multidev` | `true` | Multidev needs a Gold workspace or higher. Set `false` below that. |
 
-Set these in your GitHub repo under **Settings > Secrets and variables > Actions**:
+The names you can use in `required` and `skip` are `phpcs`, `phpstan`, `yamllint`,
+`audit`, `secrets`, `phpunit`, `behat` and `config` (the post-deploy
+`config:status`). `skip` also takes `updatedb` and `cim`.
 
-| Secret | Where to get it |
-| ------ | --------------- |
-| `PANTHEON_SSH_KEY` | Generate a keypair (`ssh-keygen -t ed25519`), add the public key to Pantheon dashboard > Account > SSH Keys, paste the private key as the secret |
-| `PANTHEON_MACHINE_TOKEN` | Pantheon dashboard > Account > Machine Tokens > Create Token |
+**Nothing blocks a merge unless you ask it to**, with two exceptions:
 
-### Finding Your Pantheon Site UUID
+- **PHPUnit blocks by default**, because a failing test means the site is broken.
+- **`updatedb` and `config:import` can be skipped but never downgraded to a
+  warning.** When they run and fail, the environment is broken.
 
-Your site UUID is in the Pantheon dashboard URL:
+To adopt gradually, start with the defaults, fix what the warnings show, and then
+list the clean checks in `required`.
+
+The rest is detected rather than configured:
+
+- the PHP version, from `composer.json` `config.platform.php`, then `pantheon.yml`;
+- which paths to check;
+- the config sync directory;
+- whether to run the Commerce smoke tests (yes when `drupal/commerce` is in
+  `composer.lock`);
+- the site's UUID.
+
+## Install with Claude Code
+
+Paste this into Claude Code from the site's repository root. It works out what it
+can from the code, asks only what it can't, and shows you the file before writing
+anything.
 
 ```text
-https://dashboard.pantheon.io/workspace/.../cms-site/{SITE-UUID}/environment/...
+Install augustash/drupal-qa (https://github.com/augustash/drupal-qa) in this
+Drupal project, which is hosted on Pantheon. Read that repository's README first.
+Its "Install" and "Options" sections are the source of truth for the workflow
+file and its inputs.
+
+1. Work out what you can from the code, without asking:
+   - the Pantheon site machine name, from .ddev/config.yaml (a PANTHEON_SITE or
+     project setting) or other config;
+   - whether ddev is used (if so, run composer as `ddev composer`);
+   - the default branch;
+   - any existing .github/workflows files, especially v1 drupal-qa files that
+     reference DanePete/drupal-qa or thronedigital/drupal-qa;
+   - whether the project already has phpunit.xml, phpstan.neon or behat.yml.
+2. Ask me before running any terminus command. If I agree, run only read-only
+   ones: `terminus site:info <site>` to confirm the site, and
+   `terminus multidev:list <site>` to see whether multidev is available.
+3. Ask me only what you could not settle, in one multiple-choice round, with
+   your recommendation first:
+   - Does Pantheon's GitHub App deploy this site (code_host: github-app), or does
+     its code live in Pantheon's git repository (code_host: pantheon, the usual
+     case)?
+   - Does the site have multidev? Ask only if terminus did not tell you.
+   Don't ask about strictness. The defaults warn and never block, which is the
+   right start.
+4. Create a branch named chore/drupal-qa. Then:
+   - run `composer require --dev augustash/drupal-qa`;
+   - write .github/workflows/drupal-qa.yml from the README, with only the inputs
+     that differ from the defaults, and the push trigger set to this repo's
+     default branch;
+   - if v1 drupal-qa is present, remove its four workflow files and
+     thronedigital/drupal-qa from composer.json;
+   - show me the diff before committing.
+5. Check that the secrets PANTHEON_MACHINE_TOKEN and PANTHEON_SSH_KEY exist, with
+   `gh secret list` and, for an organization, `gh secret list --org <org>`.
+   Never ask me to paste a secret into the chat. If one is missing, give me the
+   exact `! gh secret set NAME` command to run myself, and remind me that the SSH
+   key must be RSA.
+6. Commit. Ask me before pushing and opening the pull request. Then watch the
+   run with `gh run watch` and explain its summary table to me, step by step.
 ```
 
-Or via Terminus:
-
-```bash
-terminus site:info my-site-name --field=id
-```
-
-## Workflow Inputs
-
-### pr-checks.yml
-
-| Input | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `php_version` | string | `8.3` | PHP version |
-| `phpcs_required` | boolean | `true` | Block PR on PHPCS failures |
-| `phpstan_required` | boolean | `false` | Block PR on PHPStan failures |
-| `phpcs_paths` | string | `web/modules/custom/ web/themes/custom/` | Paths to scan |
-| `yamllint_enabled` | boolean | `true` | Lint config/ YAML files |
-
-### deploy-pantheon.yml
-
-| Input | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `php_version` | string | `8.3` | PHP version |
-| `pantheon_site` | string | required | Site machine name |
-| `pantheon_site_id` | string | required | Site UUID |
-| `phpcs_required` | boolean | `true` | Block deploy on PHPCS failures |
-| `phpstan_required` | boolean | `false` | Block deploy on PHPStan failures |
-| `phpcs_paths` | string | `web/modules/custom/ web/themes/custom/` | Paths to scan |
-| `yamllint_enabled` | boolean | `true` | Lint config/ YAML files |
-
-### multidev.yml
-
-| Input | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `php_version` | string | `8.3` | PHP version |
-| `pantheon_site` | string | required | Site machine name |
-| `pantheon_site_id` | string | required | Site UUID |
-| `run_behat` | boolean | `true` | Run Behat tests against multidev |
-| `behat_tags` | string | `smoke` | Behat tag filter |
-| `source_env` | string | `live` | Environment to clone from |
-
-### multidev-cleanup.yml
-
-| Input | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `pantheon_site` | string | required | Site machine name |
-
-## Adding Project-Specific Tests
-
-### PHPUnit
-
-Create tests in your custom modules — they're auto-discovered:
-
-```text
-web/modules/custom/my_module/tests/src/Unit/MyServiceTest.php
-```
-
-```php
-<?php
-
-namespace Drupal\Tests\my_module\Unit\Service;
-
-use Drupal\my_module\Service\PriceCalculator;
-use Drupal\Tests\UnitTestCase;
-use Drupal\Core\Config\ConfigFactoryInterface;
-use Drupal\Core\Config\ImmutableConfig;
-
-/**
- * Tests the PriceCalculator service.
- *
- * @coversDefaultClass \Drupal\my_module\Service\PriceCalculator
- *   ^ Tells PHPUnit which class this test covers (used for coverage reports).
- * @group my_module
- *   ^ Groups this test so you can run just your module's tests:
- *   ./vendor/bin/phpunit --group=my_module
- */
-class PriceCalculatorTest extends UnitTestCase {
-
-  /**
-   * The service under test.
-   */
-  protected PriceCalculator $calculator;
-
-  /**
-   * Runs before every test method.
-   *
-   * This is where you set up mocks for the service's dependencies.
-   * The real PriceCalculator takes a ConfigFactoryInterface in its
-   * constructor (dependency injection). In the test, we create fake
-   * versions of those dependencies so we can control their behavior.
-   */
-  protected function setUp(): void {
-    parent::setUp();
-
-    // Create a fake config object that returns 0.08 for 'tax_rate'.
-    // In production this would read from Drupal's config system
-    // (admin/config), but in the test we hardcode the value so the
-    // test doesn't need a database or a running Drupal site.
-    $config = $this->createMock(ImmutableConfig::class);
-    $config->method('get')
-      ->with('tax_rate')
-      ->willReturn(0.08);
-
-    // Create a fake config factory that returns our fake config
-    // when asked for 'my_module.settings'.
-    $configFactory = $this->createMock(ConfigFactoryInterface::class);
-    $configFactory->method('get')
-      ->with('my_module.settings')
-      ->willReturn($config);
-
-    // Now create the real service, injecting our fakes.
-    // This is the thing we're actually testing.
-    $this->calculator = new PriceCalculator($configFactory);
-  }
-
-  /**
-   * Tests that $100 with 8% tax = $108.
-   *
-   * This is the most basic "happy path" test — does the math work?
-   */
-  public function testCalculateWithTax(): void {
-    $result = $this->calculator->calculateTotal(100.00);
-    $this->assertEquals(108.00, $result);
-  }
-
-  /**
-   * Tests that zero in = zero out.
-   *
-   * Edge case: make sure we don't get weird floating point issues
-   * or divide-by-zero errors on a $0 price.
-   */
-  public function testZeroPriceReturnsZero(): void {
-    $this->assertEquals(0.00, $this->calculator->calculateTotal(0));
-  }
-
-  /**
-   * Tests that negative prices are rejected.
-   *
-   * The service should throw an exception rather than silently
-   * calculate tax on a negative number. This test EXPECTS the
-   * exception — if it doesn't throw, the test fails.
-   */
-  public function testNegativePriceThrowsException(): void {
-    $this->expectException(\InvalidArgumentException::class);
-    $this->calculator->calculateTotal(-50.00);
-  }
-
-}
-```
-
-**Key concepts in this example:**
-
-- **Mocking** (`createMock`) — creates fake versions of dependencies so your test doesn't need a database, config system, or running Drupal site. The test runs in milliseconds. [PHPUnit mocking docs](https://docs.phpunit.de/en/9.6/test-doubles.html)
-- **`setUp()`** — runs before every test method. Set up your mocks and create the service here. [PHPUnit fixtures docs](https://docs.phpunit.de/en/9.6/fixtures.html)
-- **`UnitTestCase`** — Drupal's base class for unit tests. Provides helpers like `getStringTranslationStub()` and `getContainerWithCacheDisabled()`. [Drupal UnitTestCase docs](https://www.drupal.org/docs/automated-testing/phpunit-in-drupal/unit-testing-more-complicated-drupal-classes)
-- **`@coversDefaultClass`** — tells PHPUnit which class this test covers, used for code coverage reports. [PHPUnit annotations docs](https://docs.phpunit.de/en/9.6/annotations.html#coversdefaultclass)
-- **`@group`** — lets you run just one module's tests: `./vendor/bin/phpunit --group=my_module`
-- **Happy path test** — does the basic case work?
-- **Edge case test** — what about zero, null, empty values?
-- **Exception test** (`expectException`) — does bad input get rejected? If the exception doesn't throw, the test fails. [PHPUnit exception testing docs](https://docs.phpunit.de/en/9.6/writing-tests-for-phpunit.html#testing-exceptions)
-
-**Further reading:**
-
-- [Drupal PHPUnit overview](https://www.drupal.org/docs/automated-testing/phpunit-in-drupal) — types of tests, directory structure, naming conventions
-- [PHPUnit file structure and namespaces in Drupal](https://www.drupal.org/docs/automated-testing/phpunit-in-drupal/phpunit-file-structure-namespace-and-required-metadata) — where test files go, required metadata
-- [Running Drupal tests](https://www.drupal.org/docs/automated-testing/phpunit-in-drupal/running-phpunit-tests) — how to run tests locally
-- [Drupal testing best practices](https://www.drupal.org/docs/develop/automated-testing) — when to use Unit vs Kernel vs Functional tests
-
-No config changes needed. The wildcard in `phpunit.xml.dist` picks it up.
-
-### Behat
-
-Add `.feature` files in `tests/behat/features/` — they run alongside the package features.
-
-Create a `FeatureContext` that extends the base:
-
-```php
-<?php
-
-use DrupalQa\Behat\FeatureContext as BaseFeatureContext;
-use DrevOps\BehatSteps\Drupal\ContentTrait;
-use DrevOps\BehatSteps\Drupal\UserTrait;
-
-class FeatureContext extends BaseFeatureContext {
-  use ContentTrait;
-  use UserTrait;
-}
-```
-
-#### Available drevops/behat-steps Traits
-
-These traits from `drevops/behat-steps` can be added to your FeatureContext with `use`:
-
-**Drupal-specific:**
-`ContentTrait`, `UserTrait`, `TaxonomyTrait`, `MediaTrait`, `FileTrait`, `MenuTrait`, `ParagraphsTrait`, `BlockTrait`, `EckTrait`, `EmailTrait`, `QueueTrait`, `SearchApiTrait`, `WebformTrait`, `WatchdogTrait`, `ModuleTrait`, `BigPipeTrait`, `OverrideTrait`
-
-**Generic (no Drupal dependency):**
-`CookieTrait`, `DateTrait`, `ElementTrait`, `FieldTrait`, `FileDownloadTrait`, `IframeTrait`, `JavascriptTrait`, `KeyboardTrait`, `LinkTrait`, `PathTrait`, `ResponseTrait`, `WaitTrait`
-
-Full docs: [drevops/behat-steps](https://github.com/drevops/behat-steps)
-
-### Commerce Behat Suite
-
-The `behat.yml.dist` includes a separate `commerce` suite that loads features from `vendor/thronedigital/drupal-qa/tests/behat/features/commerce/`. This runs automatically if the suite is included.
-
-To skip commerce tests, override `behat.yml.dist` with your own `behat.yml` that only includes the `default` suite, or run Behat with a suite filter:
-
-```bash
-./vendor/bin/behat --suite=default
-```
-
-## Customizing Configs
-
-**AI prompt to tailor configs to your project:**
-
-```text
-Look at my project structure — custom modules in web/modules/custom/, themes
-in web/themes/. Read the scaffolded phpstan.neon.dist, phpunit.xml.dist,
-grumphp.yml.dist, and behat.yml.dist. Create customized versions (without
-.dist) that are tuned to this specific project. For example:
-- Add any extra theme paths to PHPCS scanning
-- Add region_map entries to behat.yml that match my actual theme regions
-- Adjust PHPStan ignored errors if needed for my specific contrib modules
-```
-
-If you need to override a scaffolded config, copy it and remove the `.dist` extension:
-
-```bash
-cp phpstan.neon.dist phpstan.neon
-```
-
-Then edit `phpstan.neon`. The `.dist` file won't overwrite your customized version.
-
-To prevent a specific file from being scaffolded:
-
-```json
-{
-  "extra": {
-    "drupal-scaffold": {
-      "file-mapping": {
-        "[project-root]/grumphp.yml.dist": false
-      }
-    }
-  }
-}
-```
-
-## Optional Extras
-
-After the base setup, you can add deeper code quality checks with a second script:
-
-```bash
-bash <(curl -s https://raw.githubusercontent.com/DanePete/drupal-qa/main/scripts/setup-extras.sh)
-```
-
-Pick and choose from:
-
-| Extra | What it does |
-| ----- | ------------ |
-| PHPStan strict (level 5+) | Catches hallucinated methods, wrong types, bad Drupal API usage |
-| Security scanning | OWASP checks for SQL injection, XSS, command injection in custom code |
-| Unused code detection | Finds dead code, unused imports, unreachable methods |
-| Composer normalize | Enforces consistent composer.json formatting |
-| PHPCBF autofix | Shows what coding standard violations can be auto-fixed — run locally with `./vendor/bin/phpcbf` |
-| Rector dry-run | Detects deprecated Drupal API usage and suggests automated fixes |
-
-Extras run in a separate `pr-extras.yml` workflow so they **never block your main PR checks**. They report issues as warnings only.
-
-## Opinionated Defaults
-
-This package makes choices so you don't have to. Here's what we chose and why:
-
-**PHPStan level 1 by default.** Most existing Drupal projects can't pass level 5 without weeks of cleanup. Level 1 gives you real value (undefined variables, unknown classes) without drowning you in noise. The setup script lets you pick a higher level, and the AI prompts help you level up incrementally.
-
-**Gradual adoption, not all-or-nothing.** Most teams can't drop this into a legacy project and have everything pass on day one. That's why `phpcs_required` and `phpstan_required` default to `false` — violations show up as warnings in your PR so the team can see them, but nothing blocks. Fix them at your own pace. When you're ready, flip one flag to `true` and that check starts enforcing. No big-bang cleanup required.
-
-**Behat over Nightwatch.** Behat with `drupal/drupal-extension` speaks Drupal natively — it knows about roles, users, regions, and content types. Nightwatch is a better general-purpose browser testing tool, but for Drupal-specific smoke tests, Behat gets you further with less code.
-
-**GrumPHP pre-commit hooks.** Catching debug code and PHPCS violations before they're pushed saves everyone time. Some teams find pre-commit hooks annoying — if that's you, disable the scaffold: `"[project-root]/grumphp.yml.dist": false`.
-
-**Pantheon-first.** The workflows are built for Pantheon (multidev, Terminus, git push deploy). If you're on Acquia or another host, you'll need to swap the deploy workflows. The QA tooling (PHPCS, PHPStan, PHPUnit, Behat, GrumPHP, secret scanning) works on any Drupal project regardless of hosting.
-
-**Secret scanning doesn't block.** Gitleaks runs as `continue-on-error: true` so it warns but doesn't fail the build. A false positive shouldn't prevent a deploy. If you want it to block, remove `continue-on-error` from the workflow.
-
-**`CLAUDE.md` and Copilot instructions are scaffolded.** Every project gets AI-aware coding instructions out of the box. If your team doesn't use AI tools, these files are harmless — they just sit there. If anyone starts using Claude Code or Copilot, the project is already configured correctly.
-
-**`TRUE`, `FALSE`, `NULL` uppercase.** This is the Drupal coding standard, not a personal preference. The PHPCS config enforces it.
-
-## Upgrading
-
-To get the latest configs and tests:
-
-```bash
-composer update thronedigital/drupal-qa
-```
-
-Scaffolded `.dist` files will be refreshed. Your custom overrides (files without `.dist`) won't be touched.
+## Pantheon's GitHub integration and drupal-qa
+
+Pantheon now offers two ways to get code from GitHub to Pantheon. People reasonably
+ask whether that makes drupal-qa unnecessary. Not quite: Pantheon's tools move
+**code**, while drupal-qa moves code **and checks the result**. The two work
+together.
+
+### What Pantheon shipped
+
+- **The GitHub Application.** Generally available since April 2026 for Gold,
+  Platinum and Diamond workspaces; GitLab support arrived in August. Your GitHub
+  repository *is* the site's repository. Pantheon creates a multidev for each open
+  pull request and deploys the default branch to dev. You configure nothing in
+  Actions and need no secrets. ([docs](https://docs.pantheon.io/guides/external-repositories/github),
+  [announcement](https://docs.pantheon.io/release-notes/2026/04/github-application-ga))
+- **The `push-to-pantheon` GitHub Action.** Pantheon's own action for pushing code
+  to dev and to per-PR multidevs from your workflow. It is labelled *Early Access*,
+  and its README says: "Only teams with pre-existing Continuous Integration
+  pipelines that they could fall back to, should try this repository at this
+  time." ([repository](https://github.com/pantheon-systems/push-to-pantheon))
+
+### What the GitHub App is and isn't
+
+**It is:**
+
+- A connection between a GitHub or GitLab repository and a Pantheon site, so code
+  moves without a CI pipeline.
+- Automatic multidevs for pull requests, and automatic deploys of the default
+  branch to dev.
+- Pantheon running `composer install` (Integrated Composer) on each deploy.
+
+**It isn't:**
+
+- **Available on every plan.** It needs a Gold, Platinum or Diamond workspace.
+- **A switch for an existing site.** It's chosen when a site is created
+  (`terminus site:create … --vcs-provider=github`, or "use an existing
+  repository" for a repository already in Pantheon's layout). Pantheon documents
+  no way to move an existing site's code over. For a site like that, the realistic
+  path is a new site plus a database, files and domain migration. Ask Pantheon
+  support before promising it.
+- **A test runner.** Nothing in it runs PHPCS, PHPStan, PHPUnit or smoke tests,
+  and nothing stops a merge that breaks the site from deploying.
+- **A Drupal deploy.** Pantheon doesn't document running `updatedb` or
+  `config:import` after the code lands, or checking that config matches.
+- **A front-end build.** Pantheon runs `composer install` only, not `npm run build`.
+- **SFTP mode.** These sites have no SFTP mode and no Pantheon git repository.
+
+### Side by side
+
+| | Pantheon GitHub App | `push-to-pantheon` Action | drupal-qa |
+|---|---|---|---|
+| **Plan** | Gold, Platinum, Diamond | Any | Any (multidev needs Gold or higher) |
+| **Maturity** | Generally available | Early Access, before 1.0 | v2 |
+| **Existing sites** | Chosen at site creation; no documented conversion | Yes | Yes |
+| **Moves code to Pantheon** | Yes | Yes | Yes, or leaves it to the GitHub App (`code_host: github-app`) |
+| **Multidev per pull request** | Yes | Yes (`pr-N` or named after the branch) | Yes (`pr-N`) |
+| **Deletes the multidev when the PR closes** | Not documented | On a later run, with `delete_old_environments` | Yes, when the PR closes |
+| **Builds** | `composer install` | Whatever steps you add | Pantheon's Integrated Composer |
+| **PHPCS, PHPStan, PHPUnit, secret scan** | No | No (add your own jobs) | Yes; warn by default, block when listed in `required` |
+| **Can stop a broken deploy** | No | Only through jobs you add | Yes, for checks listed in `required` |
+| **`updatedb` and `config:import`** | Not documented | No | Yes, once the new code is served |
+| **Checks the environment serves the new code** | No | No | Yes, by comparing a file's hash on the container |
+| **Smoke tests against the environment** | No | No (its example runs your own Playwright job) | Behat, including logged-in pages |
+| **Gets through Pantheon's bot protection** | Not applicable | Not applicable | Yes, with the site's bot-bypass token |
+| **Reports back on the PR** | Not documented | GitHub Deployments in the PR timeline | Run summary and PR comment |
+| **Secrets you manage** | None | SSH key and machine token | SSH key and machine token (once per organization) |
+
+Where a cell says "not documented", Pantheon's documentation doesn't say either
+way. It doesn't mean "no".
+
+### Using drupal-qa with the GitHub App
+
+Set `code_host: github-app`. drupal-qa then doesn't push anything. It waits for
+Pantheon to create `pr-N` (or to deploy dev), and from there does everything it
+normally does: waits for the new code, runs `updatedb` and `config:import`, checks
+config and runs Behat. Two caveats:
+
+- **Merges deploy anyway.** Pantheon deploys whatever reaches the default branch,
+  so drupal-qa can't stop a deploy. To stop a merge, make drupal-qa's checks
+  required in the branch protection rules.
+- **`pr-N` naming is assumed.** Pantheon doesn't document how the GitHub App names
+  a pull request's environment, and this mode assumes `pr-N` until it has been
+  confirmed on a live GitHub App site.
+
+## Writing your own Behat tests
+
+Put `.feature` files in `tests/behat/features/`. They run with the package's smoke
+tests and use the steps from the Drupal Extension and Mink, plus these:
+
+- `Given I am logged in as a new user with the "editor" role`. This creates a user
+  on the environment through Drush, logs in with a one-time login link, and
+  deletes the user after the scenario. The Drupal Extension's own "logged in as a
+  user with the role" step can't create users on a remote site from version 5.3
+  on.
+- `Then I should see the ".selector" element`
+- `Then I should not see the ".selector" element`
+
+Every scenario starts logged out. If you want your own step definitions, extend
+`DrupalQa\Behat\FeatureContext` and give the project its own `behat.yml`.
 
 ## Troubleshooting
 
-**GrumPHP conflicts with existing config:**
-If your project already has a `grumphp.yml`, it takes precedence over `grumphp.yml.dist`. Either update your existing config or delete it to use the scaffolded defaults.
+**"Pantheon's bot protection challenges requests from CI".** The site is on
+Pantheon's next-generation CDN and no bypass token reached the request. Check that
+`terminus gcdn:bot-bypass <site>` returns a token when it runs as the account that
+owns the machine token.
 
-**PHPCS/PHPStan failing on first install:**
-Set `phpcs_required: false` and `phpstan_required: false` in your workflow files to unblock CI while you clean up existing violations. See [Gradual Adoption](#gradual-adoption).
+**"Could not create multidev pr-N".** The site has reached its multidev limit (delete
+an unused one), or it has no multidev (set `multidev: false`).
 
-**Scaffolded files not appearing:**
-Make sure `thronedigital/drupal-qa` is in your `allowed-packages`:
+**"Pantheon's master has commits this branch does not".** Someone committed on
+Pantheon: from the dashboard in SFTP mode, or through an Autopilot update. Merge
+Pantheon's `master` into GitHub first. drupal-qa won't push over those commits.
 
-```json
-"extra": {
-  "drupal-scaffold": {
-    "allowed-packages": ["thronedigital/drupal-qa"]
-  }
-}
-```
+**"still serves the old file after 15 minutes".** Pantheon's code log can show
+your commit while the container still runs the old build. Pushing an empty commit
+gives Pantheon a new commit to sync, and that usually clears it:
+`git commit --allow-empty -m "chore: re-sync" && git push`.
 
-Then run `composer install` again.
+**A new Pantheon site has both `main` and `master`.** Dev deploys from `master`;
+`main` is the untouched starting template. Push `master` to GitHub as your default
+branch.
 
-**Behat commerce tests failing (no Commerce installed):**
-Run only the default suite: `./vendor/bin/behat --suite=default`
+**PHPStan reports a lot on the first run.** It only warns until you add `phpstan`
+to `required`. The default is level 1. For a stricter level, give the project a
+`phpstan.neon`.
+
+## Upgrading from v1
+
+v1 was `thronedigital/drupal-qa`, with four workflow files from `DanePete/drupal-qa`.
+Its tags stay where they are, so nothing breaks until you move. To move:
+
+1. `composer remove --dev thronedigital/drupal-qa && composer require --dev augustash/drupal-qa`.
+2. Delete `pr-checks.yml`, `multidev.yml`, `multidev-cleanup.yml` and
+   `deploy-pantheon.yml`, and add the single workflow from [Install](#install).
+   Map the old inputs like this:
+   - `phpcs_required: true` becomes `required: phpcs`.
+   - `phpcs_paths` and `php_version` are detected now.
+   - `run_behat: false` becomes `skip: behat`.
+3. If v1 put `grumphp.yml.dist`, `CLAUDE.md` or `.github/copilot-instructions.md`
+   into the project, v2 no longer manages them. Keep or delete them as you like.
+
+Behat in v1 never reached the multidev. Its requests went to localhost, and its
+logged-in scenarios couldn't create users. A project-specific `behat.yml` written
+against v1 probably needs its `base_url` removed (CI sets it), and its login steps
+switched to `I am logged in as a new user with the "…" role`.
 
 ## License
 

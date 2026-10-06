@@ -286,7 +286,9 @@ jobs:
           CONFIG_DIR: ${{ needs.plan.outputs.config_dir }}
         run: |
           command -v yamllint > /dev/null || pipx install --quiet yamllint > /dev/null
-          yamllint --format github -d "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable, braces: disable, comments-indentation: disable, empty-lines: disable, indentation: {indent-sequences: whatever}}}" "$CONFIG_DIR"
+          # Only what stops Drupal importing the file: syntax errors and
+          # duplicate keys. Style rules would flag Drupal's own exports.
+          yamllint --format github -d "{rules: {key-duplicates: enable}}" "$CONFIG_DIR"
 
       - name: Composer audit
         id: audit
@@ -519,7 +521,8 @@ jobs:
           else
             if ! terminus env:info "$SITE.$ENV_NAME" --field=id > /dev/null 2>&1; then
               src=live
-              if [ "$(terminus env:info "$SITE.live" --field=initialized)" != true ]; then src=dev; fi
+              # terminus prints 1 (not true) for an initialized environment.
+              case "$(terminus env:info "$SITE.live" --field=initialized 2> /dev/null)" in 1|true) ;; *) src=dev ;; esac
               echo "Creating multidev $ENV_NAME from $src."
               terminus multidev:create "$SITE.$src" "$ENV_NAME" || {
                 echo "::error title=drupal-qa::Could not create multidev $ENV_NAME. If the site is at its multidev limit, delete an unused one; if the site has no multidev, set multidev: false."

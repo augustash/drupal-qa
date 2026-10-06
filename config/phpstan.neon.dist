@@ -4,6 +4,8 @@
 # this file would resolve relative to vendor/, not to the project.
 parameters:
   level: 1
+  # The patterns below are generic; a project that never hits one is fine.
+  reportUnmatchedIgnoredErrors: false
   fileExtensions:
     - php
     - module
