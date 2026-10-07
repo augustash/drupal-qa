@@ -153,18 +153,24 @@ Its "Install" and "Options" sections are the source of truth for the workflow
 file and its inputs.
 
 1. Work out what you can from the code, without asking:
-   - the Pantheon site machine name, from .ddev/config.yaml (a PANTHEON_SITE or
-     project setting) or other config;
+   - the Pantheon site machine name. Look in .ddev/config.yaml, the git
+     remotes, pantheon.yml, the project README and scripts. Never derive it
+     from the site's display name or the repository name; if it isn't written
+     down anywhere, it's a question for step 3;
    - whether ddev is used (if so, run composer as `ddev composer`);
-   - the default branch;
+   - the default branch, from `gh repo view --json defaultBranchRef`;
+   - the GitHub owner. `secrets: inherit` only works for repositories in the
+     augustash organization; anywhere else, pass the two secrets by name;
    - any existing .github/workflows files, especially v1 drupal-qa files that
-     reference DanePete/drupal-qa or thronedigital/drupal-qa;
+     reference DanePete/drupal-qa or thronedigital/drupal-qa, or a drupal-qa.yml
+     that's already there (update it; don't add a second);
    - whether the project already has phpunit.xml, phpstan.neon or behat.yml.
 2. Ask me before running any terminus command. If I agree, run only read-only
    ones: `terminus site:info <site>` to confirm the site, and
    `terminus multidev:list <site>` to see whether multidev is available.
 3. Ask me only what you could not settle, in one multiple-choice round, with
    your recommendation first:
+   - the site machine name, if you didn't find it;
    - Does Pantheon's GitHub App deploy this site (code_host: github-app), or does
      its code live in Pantheon's git repository (code_host: pantheon, the usual
      case)?
@@ -174,16 +180,18 @@ file and its inputs.
 4. Create a branch named chore/drupal-qa. Then:
    - run `composer require --dev augustash/drupal-qa`;
    - write .github/workflows/drupal-qa.yml from the README, with only the inputs
-     that differ from the defaults, and the push trigger set to this repo's
-     default branch;
+     that differ from the defaults, and the push trigger set to the default
+     branch;
    - if v1 drupal-qa is present, remove its four workflow files and
      thronedigital/drupal-qa from composer.json;
-   - show me the diff before committing.
+   - show me the workflow file and the composer.json change, list the packages
+     the lock file adds, and wait for my OK before committing.
 5. Check that the secrets PANTHEON_MACHINE_TOKEN and PANTHEON_SSH_KEY exist, with
-   `gh secret list` and, for an organization, `gh secret list --org <org>`.
-   Never ask me to paste a secret into the chat. If one is missing, give me the
-   exact `! gh secret set NAME` command to run myself, and remind me that the SSH
-   key must be RSA.
+   `gh secret list`, and for an organization `gh secret list --org <org>`. Listing
+   org secrets needs org admin; if that fails, tell me the org level wasn't
+   checked. Never ask me to paste a secret into the chat. If one is missing, give
+   me the exact `! gh secret set NAME` command to run myself, and remind me that
+   the SSH key must be RSA.
 6. Commit. Ask me before pushing and opening the pull request. Then watch the
    run with `gh run watch` and explain its summary table to me, step by step.
 ```
