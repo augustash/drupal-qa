@@ -335,6 +335,20 @@ logged-in scenarios couldn't create users. A project-specific `behat.yml` writte
 against v1 probably needs its `base_url` removed (CI sets it), and its login steps
 switched to `I am logged in as a new user with the "…" role`.
 
+## Releasing
+
+Sites reference the workflow as `@v2`, which is a tag that moves. Every release
+tags the exact version, then moves `v2` to the same commit. If `v2` isn't moved,
+every site on `@v2` keeps running old code; v1 shipped a fix that never reached
+`@v1` this way.
+
+```bash
+git tag v2.0.1 && git tag -f v2 v2.0.1
+git push origin v2.0.1 && git push -f origin v2
+```
+
+Test a change first on a sandbox site by pointing its workflow at `@main`.
+
 ## License
 
 MIT
