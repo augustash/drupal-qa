@@ -510,6 +510,20 @@ jobs:
         env:
           REMOTE: ${{ steps.site.outputs.remote }}
         run: |
+          # Pantheon's git server sometimes refuses a push for reasons of its
+          # own (its pre-receive hook has crashed resolving a stats host right
+          # after a multidev was created). Pushing the same commit is safe to
+          # repeat, so try three times before calling it a failure.
+          push() {
+            for attempt in 1 2 3; do
+              if git push "$@"; then return 0; fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "::notice::Pantheon refused the push (attempt $attempt of 3); retrying in 30 seconds."
+                sleep 30
+              fi
+            done
+            return 1
+          }
           git remote add pantheon "$REMOTE"
           if [ "$ENV_NAME" = dev ]; then
             git fetch --quiet pantheon master
@@ -517,7 +531,7 @@ jobs:
               echo "::error title=drupal-qa::Pantheon's master has commits this branch does not, such as a dashboard commit or an Autopilot update. Merge them into GitHub first: git fetch $REMOTE master && git merge FETCH_HEAD"
               exit 1
             fi
-            git push pantheon HEAD:refs/heads/master
+            push pantheon HEAD:refs/heads/master
           else
             if ! terminus env:info "$SITE.$ENV_NAME" --field=id > /dev/null 2>&1; then
               src=live
@@ -529,7 +543,7 @@ jobs:
                 exit 1
               }
             fi
-            git push --force pantheon "HEAD:refs/heads/$ENV_NAME"
+            push --force pantheon "HEAD:refs/heads/$ENV_NAME"
           fi
 
       - name: Wait for Pantheon to create the environment
